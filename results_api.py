@@ -145,7 +145,7 @@ def build_actual(all_matches):
             ko[str(m)] = {'home': mm['home'], 'away': mm['away'], 'w': _winner(mm),
                           'hs': mm['hs'], 'as': mm['as']}
     results = [{'group': m.get('group'), 'home': m['home'], 'away': m['away'],
-                'hs': m['hs'], 'as': m['as']} for m in group_m
+                'hs': m['hs'], 'as': m['as'], 'date': m.get('utcDate')} for m in group_m
                if m.get('hs') is not None and m.get('as') is not None]
     return {'ko': ko, 'standings': st, 'tables': tables(group_m), 'results': results,
             'groups_done': groups_done, 'raw': all_matches}

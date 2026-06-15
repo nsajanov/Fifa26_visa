@@ -157,17 +157,42 @@ async def _do_sync(ctx):
     sheets.set_facts({'standings': built['standings']})
     return built
 
-def _report_text():
+def _report_text(bot_username=None):
+    facts = sheets.get_facts(); tb = facts.get('tables') or {}
+    actual = sheets.get_actual()
     today = dt.date.today().strftime('%d.%m.%Y')
-    head = f'☀️ Доброе утро! Результаты на {today}\n\n'
-    body = _overview_text() or 'Результаты появятся после первых сыгранных матчей.'
-    tip = ('\n\n💡 Хочешь посмотреть сам: напиши боту <b>/facts</b> — увидишь все группы, '
-           'а <b>/facts A</b> покажет счёт каждого матча. По этим таблицам и выбирай, кого ставить в плей-офф.')
-    text = head + body + tip
-    lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
+    parts = [f'☀️ <b>Доброе утро! Сводка на {today}</b>']
+    # leader / best (only meaningful once playoff scoring started)
+    lb = scoring.leaderboard(sheets.all_submissions(), actual)
     if any(s['total'] > 0 for _, s in lb):
-        text += '\n\n' + _fmt_lb(lb)
-    return text
+        leader = lb[0]
+        sniper = max(lb, key=lambda r: r[1]['exact'])
+        parts.append(f"\n🏆 Лидер: <b>{leader[0]}</b> — {leader[1]['total']} очк.")
+        if sniper[1]['exact'] > 0:
+            parts.append(f"🎯 Точнее всех по счёту: {sniper[0]} ({sniper[1]['exact']})")
+    else:
+        parts.append('\n🎮 Очки пойдут с плей-офф (с 28 июня). Сейчас группы — это подсказка.')
+    # group tables: places + points
+    if tb:
+        parts.append('\n📋 <b>Группы — места и очки</b>')
+        for g in 'ABCDEFGHIJKL':
+            rows = tb.get(g, [])
+            if rows:
+                parts.append(f"<b>{g}</b>: " + ' · '.join(f"{i+1}.{r['team']} {r['pts']}" for i, r in enumerate(rows)))
+    # recent match scores
+    res = sorted([r for r in (facts.get('results') or []) if r.get('date')], key=lambda r: r['date'])
+    if res:
+        parts.append('\n⚽ <b>Последние матчи</b>')
+        for r in res[-12:]:
+            parts.append(f"{r['home']} {r['hs']}:{r['as']} {r['away']}")
+    # full detail + bot link
+    parts.append('\n💡 Счёт каждого матча группы: <b>/facts A</b> (B, C …)')
+    if bot_username:
+        parts.append(f'🔗 Открыть бота и заполнить прогноз: https://t.me/{bot_username}')
+    champ = actual.get('ko', {}).get('104', {}).get('w')
+    if champ:
+        parts.append(f'\n🏆 Чемпион: {champ}')
+    return '\n'.join(parts)
 
 async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -176,7 +201,8 @@ async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
         pass
     if not GROUP_CHAT_ID:
         return
-    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=_report_text(), parse_mode='HTML')
+    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=_report_text(ctx.bot.username),
+                               parse_mode='HTML', disable_web_page_preview=True)
 
 # ---------- admin (rarely needed) ----------
 async def sync_cmd(update: Update, ctx):
@@ -247,10 +273,12 @@ async def post_cmd(update: Update, ctx):
         await update.message.reply_text(
             '⚠️ GROUP_CHAT_ID не задан на Railway — отправляю сюда. Чтобы слать в группу, '
             'добавь бота в группу, напиши там /chatid и впиши число в GROUP_CHAT_ID.')
-        await ctx.bot.send_message(chat_id=update.effective_chat.id, text=_report_text(), parse_mode='HTML')
+        await ctx.bot.send_message(chat_id=update.effective_chat.id, text=_report_text(ctx.bot.username),
+                                   parse_mode='HTML', disable_web_page_preview=True)
         return
     try:
-        await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=_report_text(), parse_mode='HTML')
+        await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=_report_text(ctx.bot.username),
+                                   parse_mode='HTML', disable_web_page_preview=True)
         await update.message.reply_text(f'✅ Отправил отчёт в группу (id {GROUP_CHAT_ID}). Проверь её.')
     except Exception as e:
         await update.message.reply_text(
