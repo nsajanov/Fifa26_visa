@@ -188,7 +188,8 @@ async def post_cmd(update: Update, ctx):
     lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
     await ctx.bot.send_message(chat_id=GROUP_CHAT_ID or update.effective_chat.id, text=_fmt_lb(lb))
 
-def main():
+async def main():
+    import signal
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [('start', start), ('help', help_cmd), ('me', me),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd),
@@ -198,8 +199,13 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp))
     if app.job_queue:
         app.job_queue.run_daily(daily_job, time=dt.time(hour=REPORT_HOUR, minute=0))
+
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.ensure_future(app.stop()))
+
     print('Bot running…')
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
