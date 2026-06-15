@@ -202,6 +202,13 @@ def _broadcast_messages(bot_username=None):
                 msgs.append(f'📋 <b>Результаты · группы {label}</b>\n\n' + block)
     return msgs
 
+async def sync_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Silent auto-refresh of results (no posting) — keeps /facts & /results fresh."""
+    try:
+        await _do_sync(ctx)
+    except Exception:
+        pass
+
 async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await _do_sync(ctx)
@@ -313,6 +320,7 @@ def main():
     if app.job_queue:
         utc_hour = (REPORT_HOUR - TZ_OFFSET) % 24   # convert Almaty hour -> server UTC
         app.job_queue.run_daily(daily_job, time=dt.time(hour=utc_hour, minute=0))
+        app.job_queue.run_repeating(sync_job, interval=3 * 3600, first=30)  # refresh every 3h
     print('Bot running…')
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
