@@ -15,7 +15,8 @@ WEBAPP_URL = os.getenv('WEBAPP_URL', '')
 ADMIN_IDS = {int(x) for x in os.getenv('ADMIN_IDS', '').replace(' ', '').split(',') if x.strip().isdigit()}
 GROUP_CHAT_ID = os.getenv('GROUP_CHAT_ID', '')
 FD_TOKEN = os.getenv('FOOTBALL_DATA_TOKEN', '')
-REPORT_HOUR = int(os.getenv('REPORT_HOUR', '9'))
+REPORT_HOUR = int(os.getenv('REPORT_HOUR', '9'))   # hour in Almaty local time
+TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))        # Almaty = UTC+5 (no daylight saving)
 
 def is_admin(uid):
     return uid in ADMIN_IDS
@@ -37,6 +38,8 @@ async def start(update: Update, ctx):
         'Групповой этап — просто факты (смотри /facts). Игра начинается с плей-офф: '
         'все прогнозируют одну и ту же реальную сетку Round of 32 и набирают очки.\n\n'
         'Жми «Прогноз плей-офф», поставь счёт и победителя каждого матча до чемпиона.\n\n'
+        '💡 Не знаешь, кого ставить? Напиши /facts — увидишь, кто лидирует в группах прямо сейчас, '
+        'и /facts A — со счётом каждого матча. Это твоя подсказка.\n\n'
         '/facts — результаты и таблицы групп · /me — мои очки · /leaderboard · /deadline',
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True) if kb else None)
 
@@ -90,6 +93,21 @@ async def leaderboard_cmd(update: Update, ctx):
     lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
     await update.message.reply_text(_fmt_lb(lb, sub['name'] if sub else None))
 
+def _overview_text():
+    facts = sheets.get_facts(); tb = facts.get('tables') or {}
+    if not tb:
+        return None
+    lines = ['📋 <b>Группы — места и очки</b> (подсказка, кого ставить в плей-офф).',
+             'Полные счета по группе: напиши <b>/facts A</b> (B, C …)\n']
+    for g in 'ABCDEFGHIJKL':
+        rows = tb.get(g, [])
+        if rows:
+            lines.append(f"<b>{g}</b>: " + ' · '.join(f"{i+1}.{r['team']} {r['pts']}" for i, r in enumerate(rows)))
+    champ = sheets.get_actual().get('ko', {}).get('104', {}).get('w')
+    if champ:
+        lines.append(f'\n🏆 Чемпион: {champ}')
+    return '\n'.join(lines)
+
 async def facts_cmd(update: Update, ctx):
     facts = sheets.get_facts()
     tb = facts.get('tables') or {}
@@ -109,16 +127,7 @@ async def facts_cmd(update: Update, ctx):
                 out.append(f"{x['home']} {x['hs']}:{x['as']} {x['away']}")
         await update.message.reply_text('\n'.join(out))
         return
-    # overview: all groups, compact, with points
-    lines = ['📋 Группы (факт). Подробнее: /facts A']
-    for g in 'ABCDEFGHIJKL':
-        rows = tb.get(g, [])
-        if rows:
-            lines.append(f"<b>{g}</b>: " + ' · '.join(f"{i+1}.{r['team']} {r['pts']}" for i, r in enumerate(rows)))
-    champ = sheets.get_actual().get('ko', {}).get('104', {}).get('w')
-    if champ:
-        lines.append(f'\n🏆 Чемпион: {champ}')
-    await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+    await update.message.reply_text(_overview_text(), parse_mode='HTML')
 
 async def deadline_cmd(update: Update, ctx):
     d = sheets.get_deadline()
@@ -143,15 +152,21 @@ async def _do_sync(ctx):
 
 async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        built = await _do_sync(ctx)
+        await _do_sync(ctx)
     except Exception:
+        pass
+    if not GROUP_CHAT_ID:
         return
-    if built is None or not GROUP_CHAT_ID:
-        return
+    today = dt.date.today().strftime('%d.%m.%Y')
+    head = f'☀️ Доброе утро! Результаты на {today}\n\n'
+    body = _overview_text() or 'Результаты появятся после первых сыгранных матчей.'
+    tip = ('\n\n💡 Хочешь посмотреть сам: напиши боту <b>/facts</b> — увидишь все группы, '
+           'а <b>/facts A</b> покажет счёт каждого матча. По этим таблицам и выбирай, кого ставить в плей-офф.')
+    text = head + body + tip
     lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
-    today = dt.date.today().strftime('%d.%m')
-    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID,
-                               text=f'📅 Апдейт {today}\n' + _fmt_lb(lb))
+    if any(s['total'] > 0 for _, s in lb):
+        text += '\n\n' + _fmt_lb(lb)
+    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, parse_mode='HTML')
 
 # ---------- admin (rarely needed) ----------
 async def sync_cmd(update: Update, ctx):
@@ -237,7 +252,8 @@ def main():
     app.add_error_handler(on_error)
 
     if app.job_queue:
-        app.job_queue.run_daily(daily_job, time=dt.time(hour=REPORT_HOUR, minute=0))
+        utc_hour = (REPORT_HOUR - TZ_OFFSET) % 24   # convert Almaty hour -> server UTC
+        app.job_queue.run_daily(daily_job, time=dt.time(hour=utc_hour, minute=0))
     print('Bot running…')
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 

@@ -30,6 +30,7 @@ button.go{background:var(--gold);color:#1a1f2b;border:0;border-radius:10px;paddi
 <body>
 <h1>Плей-офф ЧМ 2026 — прогноз ⚽</h1>
 <p class="sub">Поставь счёт каждого матча — победитель выберется сам и пройдёт дальше до чемпиона. Ничья → выбери, кто проходит по пенальти.</p>
+<p class="sub" style="background:#1a2230;border:1px solid var(--line);border-radius:8px;padding:8px">💡 Подсказка: <b>1A</b> = победитель группы A, <b>2B</b> = 2-е место группы B, <b>3-ABCDF</b> = лучшее 3-е место из этих групп. Кто сейчас лидирует — смотри у бота командой <b>/facts</b>.</p>
 <input id="name" placeholder="Твоё имя">
 <div id="app"></div>
 <div class="bar"><div class="p" id="prog">0/32</div><button class="go" id="submit">Отправить прогноз</button></div>
@@ -122,8 +123,8 @@ function submit(){
 document.getElementById('submit').onclick=submit;
 if(tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user)
   document.getElementById('name').value=[tg.initDataUnsafe.user.first_name,tg.initDataUnsafe.user.last_name].filter(Boolean).join(' ');
-const burl=new URLSearchParams(location.search).get('bracket');
-if(burl){fetch(burl).then(r=>r.json()).then(j=>{SEED=j;render();}).catch(()=>render());}else{render();}
+const burl=new URLSearchParams(location.search).get('bracket')||'bracket.json';
+fetch(burl).then(r=>r.ok?r.json():Promise.reject()).then(j=>{SEED=j;render();}).catch(()=>render());
 </script>
 </body>
 </html>
