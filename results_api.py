@@ -22,7 +22,9 @@ def norm(name):
 
 # ---------- HTTP (only when a token is set) ----------
 def fetch_sync(token):
-    req = urllib.request.Request(API + '?status=FINISHED', headers={'X-Auth-Token': token})
+    # fetch ALL matches (scheduled + finished): scheduled knockout fixtures give us the
+    # real R32 pairings for the mini-app even before they are played.
+    req = urllib.request.Request(API, headers={'X-Auth-Token': token})
     with urllib.request.urlopen(req, timeout=30) as r:
         data = json.loads(r.read().decode())
     out = []
@@ -53,6 +55,31 @@ def standings(group_matches):
         rows = sorted(tt.items(), key=lambda kv: (-kv[1]['pts'], -(kv[1]['gf'] - kv[1]['ga']), -kv[1]['gf'], kv[0]))
         ordered[g] = [t for t, _ in rows]
     return ordered
+
+def tables(group_matches):
+    """Full group tables with points. Returns {group: [{team,p,w,d,l,gf,ga,gd,pts}, ...]}."""
+    tb = {g: {t: {'p': 0, 'w': 0, 'd': 0, 'l': 0, 'gf': 0, 'ga': 0} for t in GROUPS[g]} for g in GROUPS}
+    for m in group_matches:
+        g, h, a = m.get('group'), m.get('home'), m.get('away')
+        hs, as_ = m.get('hs'), m.get('as')
+        if g not in tb or h not in tb[g] or a not in tb[g] or hs is None or as_ is None:
+            continue
+        tb[g][h]['p'] += 1; tb[g][a]['p'] += 1
+        tb[g][h]['gf'] += hs; tb[g][h]['ga'] += as_
+        tb[g][a]['gf'] += as_; tb[g][a]['ga'] += hs
+        if hs > as_: tb[g][h]['w'] += 1; tb[g][a]['l'] += 1
+        elif as_ > hs: tb[g][a]['w'] += 1; tb[g][h]['l'] += 1
+        else: tb[g][h]['d'] += 1; tb[g][a]['d'] += 1
+    out = {}
+    for g, tt in tb.items():
+        rows = []
+        for t, d in tt.items():
+            rows.append({'team': t, 'p': d['p'], 'w': d['w'], 'd': d['d'], 'l': d['l'],
+                         'gf': d['gf'], 'ga': d['ga'], 'gd': d['gf'] - d['ga'],
+                         'pts': d['w'] * 3 + d['d']})
+        rows.sort(key=lambda r: (-r['pts'], -r['gd'], -r['gf'], r['team']))
+        out[g] = rows
+    return out
 
 def _slot_team(slot, st):
     pos = int(slot[0]); g = slot[1]
@@ -117,4 +144,8 @@ def build_actual(all_matches):
                 continue
             ko[str(m)] = {'home': mm['home'], 'away': mm['away'], 'w': _winner(mm),
                           'hs': mm['hs'], 'as': mm['as']}
-    return {'ko': ko, 'standings': st, 'groups_done': groups_done, 'raw': all_matches}
+    results = [{'group': m.get('group'), 'home': m['home'], 'away': m['away'],
+                'hs': m['hs'], 'as': m['as']} for m in group_m
+               if m.get('hs') is not None and m.get('as') is not None]
+    return {'ko': ko, 'standings': st, 'tables': tables(group_m), 'results': results,
+            'groups_done': groups_done, 'raw': all_matches}

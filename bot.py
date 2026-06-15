@@ -92,19 +92,33 @@ async def leaderboard_cmd(update: Update, ctx):
 
 async def facts_cmd(update: Update, ctx):
     facts = sheets.get_facts()
-    st = facts.get('standings')
-    if not st:
-        await update.message.reply_text('Фактов пока нет — появятся, как только сыграют первые матчи.')
+    tb = facts.get('tables') or {}
+    if not tb:
+        await update.message.reply_text('Фактов пока нет — появятся после /sync, когда сыграют первые матчи.')
         return
-    lines = ['📋 Группы (факт):']
+    arg = (ctx.args[0].upper() if ctx.args else '')
+    if arg in 'ABCDEFGHIJKL' and arg:
+        rows = tb.get(arg, [])
+        out = [f'📋 Группа {arg} — таблица', '#  Команда            И  О  ±']
+        for i, r in enumerate(rows, 1):
+            out.append(f"{i}. {r['team'][:16]:<16} {r['p']}  {r['pts']}  {r['gd']:+d}")
+        res = [x for x in (facts.get('results') or []) if x.get('group') == arg]
+        if res:
+            out.append('\nРезультаты:')
+            for x in res:
+                out.append(f"{x['home']} {x['hs']}:{x['as']} {x['away']}")
+        await update.message.reply_text('\n'.join(out))
+        return
+    # overview: all groups, compact, with points
+    lines = ['📋 Группы (факт). Подробнее: /facts A']
     for g in 'ABCDEFGHIJKL':
-        order = st.get(g, [])
-        if order:
-            lines.append(f"{g}: " + ', '.join(f'{i+1}.{t}' for i, t in enumerate(order)))
+        rows = tb.get(g, [])
+        if rows:
+            lines.append(f"<b>{g}</b>: " + ' · '.join(f"{i+1}.{r['team']} {r['pts']}" for i, r in enumerate(rows)))
     champ = sheets.get_actual().get('ko', {}).get('104', {}).get('w')
     if champ:
         lines.append(f'\n🏆 Чемпион: {champ}')
-    await update.message.reply_text('\n'.join(lines))
+    await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
 
 async def deadline_cmd(update: Update, ctx):
     d = sheets.get_deadline()
@@ -153,7 +167,8 @@ async def sync_cmd(update: Update, ctx):
         matches = await loop.run_in_executor(None, results_api.fetch_sync, FD_TOKEN)
         built = results_api.build_actual(matches)
         sheets.set_actual(built)
-        sheets.set_facts({'standings': built['standings']})
+        sheets.set_facts({'standings': built['standings'], 'tables': built.get('tables', {}),
+                          'results': built.get('results', [])})
         await update.message.reply_text(
             f'✅ Готово.\nЗавершённых матчей в API: {len(matches)}\n'
             f'Группы сыграны полностью: {"да" if built["groups_done"] else "ещё нет"}\n'
@@ -165,6 +180,24 @@ async def sync_cmd(update: Update, ctx):
             f'⚠️ Не получилось подтянуть.\nОшибка: {type(e).__name__}: {str(e)[:300]}\n\n'
             f'Если тут «403/Forbidden» — ключ неверный или тариф не отдаёт ЧМ. '
             f'Если «404/Not Found» — нет данных по турниру. Пришли мне этот текст.')
+
+async def bracket_cmd(update: Update, ctx):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text('Только для админа.')
+        return
+    ko = sheets.get_actual().get('ko', {})
+    seed = {str(m): {'home': ko[str(m)]['home'], 'away': ko[str(m)]['away']}
+            for m in range(73, 89)
+            if str(m) in ko and ko[str(m)].get('home') and ko[str(m)].get('away')}
+    if len(seed) < 16:
+        await update.message.reply_text(
+            f'Реальная сетка R32 ещё не готова ({len(seed)}/16). Сделай /sync после жеребьёвки '
+            f'плей-офф (когда сыграны все группы) — и повтори /bracket.')
+        return
+    await update.message.reply_text(
+        'Готово! Скопируй текст ниже и сохрани его как файл bracket.json РЯДОМ с index.html '
+        '(в том же репозитории/Netlify). После этого мини-игра у ВСЕХ откроется с реальными '
+        '32 командами — равный старт.\n\n' + json.dumps(seed, ensure_ascii=False))
 
 async def win_cmd(update: Update, ctx):
     if not is_admin(update.effective_user.id):
@@ -192,7 +225,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [('start', start), ('help', help_cmd), ('me', me),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd),
-                    ('deadline', deadline_cmd), ('id', id_cmd), ('sync', sync_cmd), ('win', win_cmd),
+                    ('deadline', deadline_cmd), ('id', id_cmd), ('sync', sync_cmd),
+                    ('bracket', bracket_cmd), ('win', win_cmd),
                     ('setdeadline', setdeadline_cmd), ('post', post_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp))
