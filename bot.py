@@ -157,13 +157,7 @@ async def _do_sync(ctx):
     sheets.set_facts({'standings': built['standings']})
     return built
 
-async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
-    try:
-        await _do_sync(ctx)
-    except Exception:
-        pass
-    if not GROUP_CHAT_ID:
-        return
+def _report_text():
     today = dt.date.today().strftime('%d.%m.%Y')
     head = f'☀️ Доброе утро! Результаты на {today}\n\n'
     body = _overview_text() or 'Результаты появятся после первых сыгранных матчей.'
@@ -173,7 +167,16 @@ async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
     lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
     if any(s['total'] > 0 for _, s in lb):
         text += '\n\n' + _fmt_lb(lb)
-    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, parse_mode='HTML')
+    return text
+
+async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        await _do_sync(ctx)
+    except Exception:
+        pass
+    if not GROUP_CHAT_ID:
+        return
+    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=_report_text(), parse_mode='HTML')
 
 # ---------- admin (rarely needed) ----------
 async def sync_cmd(update: Update, ctx):
@@ -240,8 +243,19 @@ async def setdeadline_cmd(update: Update, ctx):
 async def post_cmd(update: Update, ctx):
     if not is_admin(update.effective_user.id):
         return
-    lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
-    await ctx.bot.send_message(chat_id=GROUP_CHAT_ID or update.effective_chat.id, text=_fmt_lb(lb))
+    if not GROUP_CHAT_ID:
+        await update.message.reply_text(
+            '⚠️ GROUP_CHAT_ID не задан на Railway — отправляю сюда. Чтобы слать в группу, '
+            'добавь бота в группу, напиши там /chatid и впиши число в GROUP_CHAT_ID.')
+        await ctx.bot.send_message(chat_id=update.effective_chat.id, text=_report_text(), parse_mode='HTML')
+        return
+    try:
+        await ctx.bot.send_message(chat_id=GROUP_CHAT_ID, text=_report_text(), parse_mode='HTML')
+        await update.message.reply_text(f'✅ Отправил отчёт в группу (id {GROUP_CHAT_ID}). Проверь её.')
+    except Exception as e:
+        await update.message.reply_text(
+            f'⚠️ Не смог отправить в группу (id {GROUP_CHAT_ID}).\nОшибка: {type(e).__name__}: {str(e)[:200]}\n'
+            'Проверь: бот добавлен в эту группу? id правильный (с минусом)?')
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
