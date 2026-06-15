@@ -12,7 +12,7 @@ from fixtures import ROUND_OF, GROUPS
 
 BOT_TOKEN = os.environ['BOT_TOKEN']
 WEBAPP_URL = os.getenv('WEBAPP_URL', '')
-ADMIN_IDS = {int(x) for x in os.getenv('ADMIN_IDS', '').replace(' ', '').split(',') if x}
+ADMIN_IDS = {int(x) for x in os.getenv('ADMIN_IDS', '').replace(' ', '').split(',') if x.strip().isdigit()}
 GROUP_CHAT_ID = os.getenv('GROUP_CHAT_ID', '')
 FD_TOKEN = os.getenv('FOOTBALL_DATA_TOKEN', '')
 REPORT_HOUR = int(os.getenv('REPORT_HOUR', '9'))
@@ -110,6 +110,11 @@ async def deadline_cmd(update: Update, ctx):
     d = sheets.get_deadline()
     await update.message.reply_text(f'⏰ Дедлайн: {d}' if d else 'Дедлайн не задан.')
 
+async def id_cmd(update: Update, ctx):
+    uid = update.effective_user.id
+    ok = '✅ ты уже админ' if is_admin(uid) else '❗ ты пока НЕ админ — впиши это число в ADMIN_IDS на Railway'
+    await update.message.reply_text(f'Твой Telegram id: {uid}\n{ok}')
+
 # ---------- the automatic core ----------
 async def _do_sync(ctx):
     """Pull real results, rebuild the bracket, recompute, return (actual, changed)."""
@@ -187,7 +192,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [('start', start), ('help', help_cmd), ('me', me),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd),
-                    ('deadline', deadline_cmd), ('sync', sync_cmd), ('win', win_cmd),
+                    ('deadline', deadline_cmd), ('id', id_cmd), ('sync', sync_cmd), ('win', win_cmd),
                     ('setdeadline', setdeadline_cmd), ('post', post_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp))
