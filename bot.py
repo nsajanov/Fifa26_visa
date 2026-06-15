@@ -196,10 +196,16 @@ def main():
                     ('setdeadline', setdeadline_cmd), ('post', post_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, on_webapp))
+
+    async def on_error(update, ctx):
+        import logging
+        logging.error('Update error: %s', ctx.error)
+    app.add_error_handler(on_error)
+
     if app.job_queue:
         app.job_queue.run_daily(daily_job, time=dt.time(hour=REPORT_HOUR, minute=0))
     print('Bot running…')
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
