@@ -123,7 +123,10 @@ async def _do_sync(ctx):
     return built
 
 async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
-    built = await _do_sync(ctx)
+    try:
+        built = await _do_sync(ctx)
+    except Exception:
+        return
     if built is None or not GROUP_CHAT_ID:
         return
     lb = scoring.leaderboard(sheets.all_submissions(), sheets.get_actual())
@@ -134,12 +137,29 @@ async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
 # ---------- admin (rarely needed) ----------
 async def sync_cmd(update: Update, ctx):
     if not is_admin(update.effective_user.id):
+        await update.message.reply_text('Эта команда только для админа. Проверь переменную ADMIN_IDS.')
         return
-    built = await _do_sync(ctx)
-    if built is None:
-        await update.message.reply_text('FOOTBALL_DATA_TOKEN не задан — авто-подтяг выключен.')
+    if not FD_TOKEN:
+        await update.message.reply_text('⚠️ Не задан FOOTBALL_DATA_TOKEN в переменных Railway — автоподтяг выключен.')
         return
-    await update.message.reply_text(f'✅ Подтянуто. Матчей плей-офф решено: {len(built["ko"])}/32.')
+    await update.message.reply_text('⏳ Тяну результаты из football-data.org…')
+    try:
+        loop = asyncio.get_event_loop()
+        matches = await loop.run_in_executor(None, results_api.fetch_sync, FD_TOKEN)
+        built = results_api.build_actual(matches)
+        sheets.set_actual(built)
+        sheets.set_facts({'standings': built['standings']})
+        await update.message.reply_text(
+            f'✅ Готово.\nЗавершённых матчей в API: {len(matches)}\n'
+            f'Группы сыграны полностью: {"да" if built["groups_done"] else "ещё нет"}\n'
+            f'Матчей плей-офф разобрано: {len(built["ko"])}/32\n\n'
+            f'Теперь проверь /facts. Если матчей 0 — значит на этом ключе нет данных ЧМ '
+            f'(нужен другой источник, напиши мне).')
+    except Exception as e:
+        await update.message.reply_text(
+            f'⚠️ Не получилось подтянуть.\nОшибка: {type(e).__name__}: {str(e)[:300]}\n\n'
+            f'Если тут «403/Forbidden» — ключ неверный или тариф не отдаёт ЧМ. '
+            f'Если «404/Not Found» — нет данных по турниру. Пришли мне этот текст.')
 
 async def win_cmd(update: Update, ctx):
     if not is_admin(update.effective_user.id):
