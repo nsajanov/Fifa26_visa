@@ -108,26 +108,41 @@ def _overview_text():
         lines.append(f'\n🏆 Чемпион: {champ}')
     return '\n'.join(lines)
 
+def _group_detail(g):
+    facts = sheets.get_facts(); rows = (facts.get('tables') or {}).get(g, [])
+    if not rows:
+        return None
+    out = [f'<b>Группа {g}</b>']
+    for i, r in enumerate(rows, 1):
+        mark = ' ✅' if i <= 2 else (' (3-е)' if i == 3 else '')
+        out.append(f"{i}. {r['team']} — {r['pts']} очк · {r['gf']}:{r['ga']} ({r['gd']:+d}){mark}")
+    res = [x for x in (facts.get('results') or []) if x.get('group') == g]
+    if res:
+        out.append('Матчи:')
+        for x in res:
+            out.append(f"  {x['home']} {x['hs']}:{x['as']} {x['away']}")
+    return '\n'.join(out)
+
 async def facts_cmd(update: Update, ctx):
-    facts = sheets.get_facts()
-    tb = facts.get('tables') or {}
+    tb = sheets.get_facts().get('tables') or {}
     if not tb:
         await update.message.reply_text('Фактов пока нет — появятся после /sync, когда сыграют первые матчи.')
         return
     arg = (ctx.args[0].upper() if ctx.args else '')
     if arg in 'ABCDEFGHIJKL' and arg:
-        rows = tb.get(arg, [])
-        out = [f'📋 Группа {arg} — таблица', '#  Команда            И  О  ±']
-        for i, r in enumerate(rows, 1):
-            out.append(f"{i}. {r['team'][:16]:<16} {r['p']}  {r['pts']}  {r['gd']:+d}")
-        res = [x for x in (facts.get('results') or []) if x.get('group') == arg]
-        if res:
-            out.append('\nРезультаты:')
-            for x in res:
-                out.append(f"{x['home']} {x['hs']}:{x['as']} {x['away']}")
-        await update.message.reply_text('\n'.join(out))
+        await update.message.reply_text(_group_detail(arg) or 'Нет данных по группе.', parse_mode='HTML')
         return
     await update.message.reply_text(_overview_text(), parse_mode='HTML')
+
+async def results_cmd(update: Update, ctx):
+    tb = sheets.get_facts().get('tables') or {}
+    if not tb:
+        await update.message.reply_text('Результатов пока нет — нажми /sync (или подожди утренней сводки).')
+        return
+    for half in ('ABCDEF', 'GHIJKL'):
+        block = '\n\n'.join(x for x in (_group_detail(g) for g in half) if x)
+        if block:
+            await update.message.reply_text(block, parse_mode='HTML')
 
 async def deadline_cmd(update: Update, ctx):
     d = sheets.get_deadline()
@@ -186,7 +201,7 @@ def _report_text(bot_username=None):
         for r in res[-12:]:
             parts.append(f"{r['home']} {r['hs']}:{r['as']} {r['away']}")
     # full detail + bot link
-    parts.append('\n💡 Счёт каждого матча группы: <b>/facts A</b> (B, C …)')
+    parts.append('\n💡 Все счета сразу — команда <b>/results</b>; по одной группе — <b>/facts A</b>.')
     if bot_username:
         parts.append(f'🔗 Открыть бота и заполнить прогноз: https://t.me/{bot_username}')
     champ = actual.get('ko', {}).get('104', {}).get('w')
@@ -289,7 +304,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [('start', start), ('help', help_cmd), ('me', me),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd),
-                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('sync', sync_cmd),
+                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd),
+                    ('results', results_cmd), ('sync', sync_cmd),
                     ('bracket', bracket_cmd), ('win', win_cmd),
                     ('setdeadline', setdeadline_cmd), ('post', post_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
