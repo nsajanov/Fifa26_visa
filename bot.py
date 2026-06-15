@@ -138,6 +138,13 @@ async def id_cmd(update: Update, ctx):
     ok = '✅ ты уже админ' if is_admin(uid) else '❗ ты пока НЕ админ — впиши это число в ADMIN_IDS на Railway'
     await update.message.reply_text(f'Твой Telegram id: {uid}\n{ok}')
 
+async def chatid_cmd(update: Update, ctx):
+    c = update.effective_chat
+    note = ('\n👉 Это id ГРУППЫ — впиши его в GROUP_CHAT_ID на Railway.'
+            if c.type in ('group', 'supergroup')
+            else '\n(Это личный чат. Чтобы узнать id ГРУППЫ — добавь бота в группу и напиши там /chatid.)')
+    await update.message.reply_text(f'id этого чата: {c.id}\nтип: {c.type}{note}')
+
 # ---------- the automatic core ----------
 async def _do_sync(ctx):
     """Pull real results, rebuild the bracket, recompute, return (actual, changed)."""
@@ -240,7 +247,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [('start', start), ('help', help_cmd), ('me', me),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd),
-                    ('deadline', deadline_cmd), ('id', id_cmd), ('sync', sync_cmd),
+                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('sync', sync_cmd),
                     ('bracket', bracket_cmd), ('win', win_cmd),
                     ('setdeadline', setdeadline_cmd), ('post', post_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
