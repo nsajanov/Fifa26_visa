@@ -6,22 +6,24 @@ The whole bracket (R16 -> Final) is built automatically from these 16 pairs."""
 # 16 Round-of-32 matchups (home, away), in bracket order (adjacent pairs meet next round).
 # Real WC 2026 knockout bracket (confirmed after the group stage).
 R32_PAIRS = [
-    ("Germany", "Paraguay"),                      # M74
-    ("France", "Sweden"),                         # M77
-    ("South Africa", "Canada"),                   # M73
-    ("Netherlands", "Morocco"),                   # M75
-    ("Colombia", "Ghana"),                        # M83
-    ("Spain", "Austria"),                         # M84
-    ("United States", "Bosnia and Herzegovina"),  # M81
-    ("Belgium", "Senegal"),                       # M82
-    ("Brazil", "Japan"),                          # M76
-    ("Cote d'Ivoire", "Norway"),                  # M78
-    ("Mexico", "Ecuador"),                        # M79
-    ("England", "DR Congo"),                      # M80
-    ("Argentina", "Cabo Verde"),                  # M86
-    ("Australia", "Egypt"),                       # M88
-    ("Switzerland", "Algeria"),                   # M85
-    ("Portugal", "Croatia"),                      # M87
+    # ----- LEFT half (positions 0-7) -----
+    ("Germany", "Paraguay"),                      # top-left R16
+    ("France", "Sweden"),
+    ("South Africa", "Canada"),
+    ("Netherlands", "Morocco"),
+    ("Portugal", "Croatia"),                      # Portugal — LEFT half
+    ("Spain", "Austria"),                         # meets Portugal in last 16
+    ("United States", "Bosnia and Herzegovina"),
+    ("Belgium", "Senegal"),
+    # ----- RIGHT half (positions 8-15) -----
+    ("Brazil", "Japan"),
+    ("Cote d'Ivoire", "Norway"),
+    ("Mexico", "Ecuador"),
+    ("England", "DR Congo"),
+    ("Argentina", "Cabo Verde"),                  # Argentina — RIGHT half
+    ("Australia", "Egypt"),
+    ("Switzerland", "Algeria"),
+    ("Colombia", "Ghana"),
 ]
 
 ROUND_NAMES = ['1/16 финала', '1/8 финала', '1/4 финала', '1/2 финала', 'ФИНАЛ']
