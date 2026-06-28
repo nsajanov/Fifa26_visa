@@ -72,6 +72,15 @@ def get_submission(user_id):
     db = _load_local()
     return db['players'].get(str(user_id))
 
+def clear_submissions():
+    """Wipe all player predictions (keeps results/deadline)."""
+    if _use_sheets():
+        _connect()
+        _ws_players.clear()
+        _ws_players.append_row(['user_id', 'name', 'submission_json', 'updated_at'])
+    else:
+        db = _load_local(); db['players'] = {}; _save_local(db)
+
 def all_submissions():
     """Returns {name: submission_dict}."""
     out = {}

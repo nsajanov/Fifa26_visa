@@ -34,15 +34,12 @@ def _deadline_passed():
         return False
 
 # ======================= prediction flow (buttons) =======================
-START_BTN = InlineKeyboardMarkup([[InlineKeyboardButton('▶️ Заполнить прогноз', callback_data='go')]])
-
 async def start(update: Update, ctx):
+    # одно нажатие START -> сразу первый матч, без лишних кнопок
     await update.message.reply_text(
-        '⚽ Прогноз плей-офф Чемпионата мира 2026!\n\n'
-        'Я проведу тебя по сетке прямо тут: показываю матч — ты жмёшь, кто проходит дальше. '
-        'И так до чемпиона (~1 минута).\n\n'
-        'Команды: /mybracket — мой прогноз · /leaderboard — таблица · /facts — группы · /deadline',
-        reply_markup=START_BTN)
+        '⚽ Прогноз плей-офф ЧМ-2026! Жми, кто проходит дальше — и так до чемпиона.\n'
+        'Переделать — /restart · мой прогноз — /mybracket · таблица — /leaderboard')
+    await _begin(update, ctx)
 
 async def _send_match(chat_id, ctx):
     idx = ctx.user_data['idx']; picks = ctx.user_data['picks']
@@ -250,6 +247,18 @@ async def aw_cmd(update: Update, ctx):   # /aw <match 1-31> <team>
     except Exception:
         await update.message.reply_text('Формат: /aw 1 Brazil  (номер матча 1–31)')
 
+async def reset_cmd(update: Update, ctx):
+    if not is_admin(update.effective_user.id):
+        return
+    if not ctx.args or ctx.args[0].lower() != 'confirm':
+        n = len(sheets.all_submissions())
+        await update.message.reply_text(
+            f'⚠️ Это удалит ВСЕ прогнозы ({n} шт.), чтобы все заполнили заново. '
+            'Подтверди: /reset confirm')
+        return
+    sheets.clear_submissions()
+    await update.message.reply_text('✅ Все прогнозы обнулены. Попроси участников снова нажать /start.')
+
 async def setdeadline_cmd(update: Update, ctx):
     if not is_admin(update.effective_user.id):
         return
@@ -274,7 +283,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     for cmd, fn in [('start', start), ('restart', restart), ('mybracket', mybracket),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd), ('sync', sync_cmd),
-                    ('post', post_cmd), ('aw', aw_cmd), ('setdeadline', setdeadline_cmd),
+                    ('post', post_cmd), ('aw', aw_cmd), ('reset', reset_cmd), ('setdeadline', setdeadline_cmd),
                     ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_callback))
