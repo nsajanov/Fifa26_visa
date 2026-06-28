@@ -15,8 +15,9 @@ WEBAPP_URL = os.getenv('WEBAPP_URL', '')
 ADMIN_IDS = {int(x) for x in os.getenv('ADMIN_IDS', '').replace(' ', '').split(',') if x.strip().isdigit()}
 GROUP_CHAT_ID = os.getenv('GROUP_CHAT_ID', '')
 FD_TOKEN = os.getenv('FOOTBALL_DATA_TOKEN', '')
-REPORT_HOUR = int(os.getenv('REPORT_HOUR', '9'))   # hour in Almaty local time
-TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))        # Almaty = UTC+5 (no daylight saving)
+SYNC_HOUR = int(os.getenv('SYNC_HOUR', '10'))   # auto-sync hour, Almaty time
+POST_HOUR = int(os.getenv('POST_HOUR', '11'))   # auto-post hour, Almaty time
+TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))    # Almaty = UTC+5 (no daylight saving)
 
 def is_admin(uid):
     return uid in ADMIN_IDS
@@ -26,7 +27,8 @@ def _deadline_passed():
     if not d:
         return False
     try:
-        return dt.datetime.now() > dt.datetime.strptime(d, '%Y-%m-%d %H:%M')
+        now_almaty = dt.datetime.utcnow() + dt.timedelta(hours=TZ_OFFSET)
+        return now_almaty > dt.datetime.strptime(d, '%Y-%m-%d %H:%M')
     except ValueError:
         return False
 
@@ -146,7 +148,7 @@ async def results_cmd(update: Update, ctx):
 
 async def deadline_cmd(update: Update, ctx):
     d = sheets.get_deadline()
-    await update.message.reply_text(f'⏰ Дедлайн: {d}' if d else 'Дедлайн не задан.')
+    await update.message.reply_text(f'⏰ Дедлайн (по Алматы): {d}' if d else 'Дедлайн не задан.')
 
 async def id_cmd(update: Update, ctx):
     uid = update.effective_user.id
@@ -209,11 +211,8 @@ async def sync_job(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-async def daily_job(ctx: ContextTypes.DEFAULT_TYPE):
-    try:
-        await _do_sync(ctx)
-    except Exception:
-        pass
+async def post_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Auto-post the results + leaderboard to the group (no fetch here)."""
     if not GROUP_CHAT_ID:
         return
     for m in _broadcast_messages(ctx.bot.username):
@@ -318,11 +317,14 @@ def main():
     app.add_error_handler(on_error)
 
     if app.job_queue:
-        utc_hour = (REPORT_HOUR - TZ_OFFSET) % 24   # convert Almaty hour -> server UTC
-        app.job_queue.run_daily(daily_job, time=dt.time(hour=utc_hour, minute=0))
-        app.job_queue.run_repeating(sync_job, interval=3 * 3600, first=30)  # refresh every 3h
+        app.job_queue.run_daily(sync_job, time=dt.time(hour=(SYNC_HOUR - TZ_OFFSET) % 24, minute=0))
+        app.job_queue.run_daily(post_job, time=dt.time(hour=(POST_HOUR - TZ_OFFSET) % 24, minute=0))
+        print(f'Scheduled: sync {SYNC_HOUR}:00 / post {POST_HOUR}:00 Almaty.')
+    else:
+        print('WARNING: job_queue is None. Add python-telegram-bot[job-queue] to requirements.')
     print('Bot running…')
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
+

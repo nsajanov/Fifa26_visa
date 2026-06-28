@@ -132,3 +132,11 @@ def get_deadline():
 
 def set_deadline(value):
     _state_set('deadline', value)
+
+def get_winners():
+    raw = _state_get('winners', '')
+    return json.loads(raw) if raw else {}
+
+def set_winner(idx, team):
+    w = get_winners(); w[str(idx)] = team
+    _state_set('winners', json.dumps(w, ensure_ascii=False))

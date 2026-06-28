@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/28968688/README.md)
 # ⚽ WC 2026 Playoff Predictor — Telegram-бот (полностью автоматический)
 
 Прогнозный турнир по **плей-офф** Чемпионата мира 2026 прямо в Telegram.
@@ -41,7 +40,7 @@
 
 ### 5) Хостинг бота (Railway, бесплатно)
 railway.app → New Project → Deploy from GitHub (загрузи эту папку). В **Variables** впиши всё из `.env.example`:
-`BOT_TOKEN`, `WEBAPP_URL`, `ADMIN_IDS` (твой id — узнать у @userinfobot), `GROUP_CHAT_ID`, `FOOTBALL_DATA_TOKEN`, `REPORT_HOUR`, `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`. Railway сам запустит `python bot.py` (см. `Procfile`).
+`BOT_TOKEN`, `WEBAPP_URL`, `ADMIN_IDS` (твой id — узнать у @userinfobot), `GROUP_CHAT_ID`, `FOOTBALL_DATA_TOKEN`, `SYNC_HOUR`/`POST_HOUR`, `SPREADSHEET_ID`, `GOOGLE_CREDENTIALS_JSON`. Railway сам запустит `python bot.py` (см. `Procfile`).
 
 ### 6) Старт
 `/start` боту → `/setdeadline 2026-06-28 16:00` (закрытие приёма перед первым матчем плей-офф). Разошли ссылку на бота коллегам.
@@ -49,7 +48,7 @@ railway.app → New Project → Deploy from GitHub (загрузи эту пап
 ---
 
 ## Что происходит дальше (само)
-- Каждый день в `REPORT_HOUR:00` бот тянет результаты, обновляет таблицы групп (факты) и сетку плей-офф, пересчитывает очки и постит лидерборд в общий чат.
+- Каждый день: авто-подтяг в 10:00 и публикация в 11:00 (по Алматы) бот тянет результаты, обновляет таблицы групп (факты) и сетку плей-офф, пересчитывает очки и постит лидерборд в общий чат.
 - Игроки: `/facts` — результаты и группы · `/me` — мои очки · `/leaderboard`.
 
 ## Админ (обычно НЕ нужно — всё авто)
