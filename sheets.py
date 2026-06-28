@@ -140,3 +140,7 @@ def get_winners():
 def set_winner(idx, team):
     w = get_winners(); w[str(idx)] = team
     _state_set('winners', json.dumps(w, ensure_ascii=False))
+
+def set_winners_bulk(d):
+    w = get_winners(); w.update({str(k): v for k, v in d.items()})
+    _state_set('winners', json.dumps(w, ensure_ascii=False))
