@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Google Sheets data layer. Stores player submissions and the admin's actual results.
 Falls back to a local JSON file if no Google creds are configured (handy for testing)."""
-import os, json, time
+import os, json, time, re
 
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID', '')
 GOOGLE_CREDS = os.getenv('GOOGLE_CREDENTIALS_JSON', '')   # the service-account JSON (whole string)
@@ -196,8 +196,20 @@ def get_deadline():
 def set_deadline(value):
     _state_set('deadline', value)
 
+def _salvage_str_map(raw):
+    """Rebuild a flat {key: value} map from slightly-broken JSON (e.g. a stray quote
+    typed by hand into the winners cell). Returns {} if nothing usable."""
+    pairs = re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', raw or '')
+    return {k: v for k, v in pairs}
+
 def get_winners():
-    return _safe_json(_state_get('winners', ''), {})
+    raw = _state_get('winners', '')
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return _salvage_str_map(raw)   # self-heal a hand-edited typo in the cell
 
 def set_winner(idx, team):
     w = get_winners(); w[str(idx)] = team

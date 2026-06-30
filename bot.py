@@ -130,7 +130,7 @@ def _fmt_lb(rows, top=20):
     medals = {1: '🥇', 2: '🥈', 3: '🥉'}
     out = ['🏆 Таблица лидеров']
     for i, (name, t, c) in enumerate(rows[:top], 1):
-        out.append(f"{medals.get(i, str(i)+'.')} {name} — {t:g} ({c})")
+        out.append(f"{medals.get(i, str(i)+'.')} {name} — {t:g}")
     return '\n'.join(out) if len(out) > 1 else '🏆 Пока нет прогнозов.'
 
 async def leaderboard_cmd(update: Update, ctx):
@@ -179,7 +179,10 @@ def _playoff_results_text(recent, hours=WINDOW_HOURS):
     for idx in sorted(recent):
         d = recent[idx]
         tag = ROUND_TAG.get(bracket.round_of(idx), '')
-        lines.append(f"{tag}: {d['home']} {d['hs']}–{d['as']} {d['away']} → 🏆 {d['w']}")
+        if d.get('hs') is not None:
+            lines.append(f"{tag}: {d['home']} {d['hs']}–{d['as']} {d['away']} → 🏆 {d['w']}")
+        else:
+            lines.append(f"{tag}: 🏆 {d['w']}")
     return '\n'.join(lines)
 
 def _top_gainers_text(recent, hours=WINDOW_HOURS, top=3):
@@ -199,20 +202,57 @@ def _top_gainers_text(recent, hours=WINDOW_HOURS, top=3):
     medals = {1: '🥇', 2: '🥈', 3: '🥉'}
     lines = [f'🔥 <b>Лучшие за {hours}ч</b>']
     for i, (name, g, c) in enumerate(gains[:top], 1):
-        lines.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g} ({c})")
+        lines.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g}")
     return '\n'.join(lines)
 
+def _playoff_overall_text(top=3):
+    """Fallback when no timed results yet: show all decided playoff winners
+    (with score if known) + top performers by total playoff points."""
+    won = sheets.get_winners()
+    if not won:
+        return None
+    koinfo = sheets.get_koinfo()
+    lines = ['⚽ <b>Плей-офф — сыграно</b>']
+    for idx in sorted(int(k) for k in won):
+        tag = ROUND_TAG.get(bracket.round_of(idx), '')
+        d = koinfo.get(str(idx)) or {}
+        if d.get('hs') is not None:
+            lines.append(f"{tag}: {d['home']} {d['hs']}–{d['as']} {d['away']} → 🏆 {won[str(idx)]}")
+        else:
+            lines.append(f"{tag}: 🏆 {won[str(idx)]}")
+    gains = []
+    for name, sub in sheets.all_submissions().items():
+        picks = sub.get('picks', {}); g = 0.0
+        for k, team in won.items():
+            if picks.get(str(int(k))) == team:
+                g += bracket.ROUND_POINTS[bracket.round_of(int(k))]
+        if g > 0:
+            gains.append((name, g))
+    block = '\n'.join(lines)
+    if gains:
+        gains.sort(key=lambda r: (-r[1], r[0]))
+        medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+        gl = ['🔥 <b>Лучшие в плей-офф</b>']
+        for i, (name, g) in enumerate(gains[:top], 1):
+            gl.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g}")
+        block += '\n\n' + '\n'.join(gl)
+    return block
+
 def _digest_text(header):
-    """Daily digest: leaderboard + recent playoff results + top gainers of the window."""
-    recent = _recent_ko()
+    """Daily digest: leaderboard + playoff results. Uses the timed 'last Nh' blocks
+    when sync has real scored results; otherwise falls back to overall playoff so far."""
     parts = [header + _fmt_lb(_leaderboard())]
-    res = _playoff_results_text(recent)
-    if res:
-        parts.append(res)
-    gain = _top_gainers_text(recent)
-    if gain:
-        parts.append(gain)
-    return '\n\n'.join(parts)
+    recent = _recent_ko()
+    if recent:
+        parts.append(_playoff_results_text(recent))
+        gain = _top_gainers_text(recent)
+        if gain:
+            parts.append(gain)
+    else:
+        fb = _playoff_overall_text()
+        if fb:
+            parts.append(fb)
+    return '\n\n'.join(p for p in parts if p)
 
 def _norm(s):
     return (s or '').strip().lower()
@@ -307,7 +347,11 @@ async def aw_cmd(update: Update, ctx):   # /aw <match 1-31> <team>
         return
     try:
         m = int(ctx.args[0]); team = ' '.join(ctx.args[1:]); assert 1 <= m <= bracket.TOTAL and team
-        sheets.set_winner(m - 1, team)
+        idx = m - 1
+        sheets.set_winner(idx, team)
+        home, away = bracket.R32_PAIRS[idx] if idx < 16 else (None, None)
+        sheets.set_koinfo({idx: {'w': team, 'home': home, 'away': away, 'hs': None, 'as': None,
+                                 'date': dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}})
         await update.message.reply_text(f'✅ Матч {m}: победитель {team}.')
     except Exception:
         await update.message.reply_text('Формат: /aw 1 Brazil  (номер матча 1–31)')
