@@ -11,6 +11,24 @@ _gc = None
 _ws_players = None
 _ws_state = None
 
+# ---- tiny in-memory cache to avoid Google Sheets read-quota (429) bursts ----
+_CACHE_TTL = 45            # seconds; reads are served from memory within this window
+_cache = {}               # key -> (timestamp, value)
+
+def _cache_get(key):
+    v = _cache.get(key)
+    if v and (time.time() - v[0]) < _CACHE_TTL:
+        return v[1]
+    return None
+
+def _cache_put(key, val):
+    _cache[key] = (time.time(), val)
+    return val
+
+def _cache_bust(*keys):
+    for k in keys:
+        _cache.pop(k, None)
+
 def _use_sheets():
     return bool(SPREADSHEET_ID and GOOGLE_CREDS)
 
@@ -60,18 +78,28 @@ def save_submission(user_id, name, data):
         db['players'][str(user_id)] = {'name': name, 'submission': data,
                                        'updated_at': time.strftime('%Y-%m-%d %H:%M')}
         _save_local(db)
+    _cache_bust('rows', 'subs')
+
+def _player_rows():
+    """All player rows (minus header), cached to avoid read-quota bursts."""
+    if _use_sheets():
+        c = _cache_get('rows')
+        if c is not None:
+            return c
+        _connect()
+        rows = _ws_players.get_all_values()[1:]   # 1 read, then served from cache
+        return _cache_put('rows', rows)
+    return None
 
 def get_submission(user_id):
     if _use_sheets():
-        _connect()
-        cell = _ws_players.find(str(user_id), in_column=1)
-        if not cell:
-            return None
-        row = _ws_players.row_values(cell.row)
-        try:
-            return {'name': row[1], 'submission': json.loads(row[2])}
-        except Exception:
-            return None
+        for row in _player_rows():
+            if row and row[0] == str(user_id) and len(row) >= 3 and row[2]:
+                try:
+                    return {'name': row[1], 'submission': json.loads(row[2])}
+                except Exception:
+                    return None
+        return None
     db = _load_local()
     return db['players'].get(str(user_id))
 
@@ -83,31 +111,45 @@ def clear_submissions():
         _ws_players.append_row(['user_id', 'name', 'submission_json', 'updated_at'])
     else:
         db = _load_local(); db['players'] = {}; _save_local(db)
+    _cache_bust('rows', 'subs')
 
 def all_submissions():
     """Returns {name: submission_dict}."""
-    out = {}
     if _use_sheets():
-        _connect()
-        for row in _ws_players.get_all_values()[1:]:
+        c = _cache_get('subs')
+        if c is not None:
+            return c
+        out = {}
+        for row in _player_rows():
             if len(row) >= 3 and row[2] and row[1]:
                 try:
                     out[row[1]] = json.loads(row[2])
                 except Exception:
                     continue   # skip rows with broken/partial JSON instead of crashing
-    else:
-        for p in _load_local()['players'].values():
-            out[p['name']] = p['submission']
+        return _cache_put('subs', out)
+    out = {}
+    for p in _load_local()['players'].values():
+        out[p['name']] = p['submission']
     return out
 
-def _state_get(key, default=None):
+def _state_all():
+    """All state rows as {key: value}, cached (1 read per TTL window)."""
     if _use_sheets():
+        c = _cache_get('state')
+        if c is not None:
+            return c
         _connect()
-        cell = _ws_state.find(key, in_column=1)
-        return _ws_state.cell(cell.row, 2).value if cell else default
-    return _load_local()['state'].get(key, default)
+        rows = _ws_state.get_all_values()
+        d = {r[0]: (r[1] if len(r) > 1 else '') for r in rows[1:] if r and r[0]}
+        return _cache_put('state', d)
+    return _load_local()['state']
+
+def _state_get(key, default=None):
+    v = _state_all().get(key, default)
+    return v if v not in (None, '') else default
 
 def _state_set(key, value):
+    _cache_bust('state')
     if _use_sheets():
         _connect()
         cell = _ws_state.find(key, in_column=1)

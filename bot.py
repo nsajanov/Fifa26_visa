@@ -109,8 +109,10 @@ async def mybracket(update: Update, ctx):
     await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
 
 # ======================= scoring / leaderboard =======================
-def _score(picks):
-    actual = sheets.get_winners(); total = 0.0; correct = 0
+def _score(picks, actual=None):
+    if actual is None:
+        actual = sheets.get_winners()
+    total = 0.0; correct = 0
     for k, team in picks.items():
         i = int(k)
         if actual.get(str(i)) and actual[str(i)] == team:
@@ -118,7 +120,9 @@ def _score(picks):
     return total, correct
 
 def _leaderboard():
-    rows = [(name, *_score(sub.get('picks', {}))) for name, sub in sheets.all_submissions().items()]
+    actual = sheets.get_winners()                      # fetch ONCE, not per player
+    subs = sheets.all_submissions()                    # cached read
+    rows = [(name, *_score(sub.get('picks', {}), actual)) for name, sub in subs.items()]
     rows.sort(key=lambda r: (-r[1], -r[2], r[0]))
     return rows
 
