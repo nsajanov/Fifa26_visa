@@ -206,3 +206,11 @@ def set_winner(idx, team):
 def set_winners_bulk(d):
     w = get_winners(); w.update({str(k): v for k, v in d.items()})
     _state_set('winners', json.dumps(w, ensure_ascii=False))
+
+def get_koinfo():
+    """Per-bracket-position match details: {idx: {w, home, away, hs, as, date}}."""
+    return _safe_json(_state_get('koinfo', ''), {})
+
+def set_koinfo(d):
+    cur = get_koinfo(); cur.update({str(k): v for k, v in d.items()})
+    _state_set('koinfo', json.dumps(cur, ensure_ascii=False))

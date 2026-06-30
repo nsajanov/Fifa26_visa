@@ -152,11 +152,74 @@ async def facts_cmd(update: Update, ctx):
     t = _facts_text()
     await update.message.reply_text(t or 'Фактов пока нет — будут после /sync.', parse_mode='HTML')
 
+WINDOW_HOURS = int(os.getenv('DIGEST_HOURS', '20'))
+ROUND_TAG = {0: '1/16', 1: '1/8', 2: '1/4', 3: '1/2', 4: 'Финал'}
+
+def _recent_ko(hours=WINDOW_HOURS):
+    """{idx: match_detail} for playoff matches finished within the last `hours`."""
+    info = sheets.get_koinfo()
+    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=hours)
+    recent = {}
+    for k, d in info.items():
+        ds = d.get('date')
+        if not ds or not d.get('w'):
+            continue
+        try:
+            t = dt.datetime.strptime(ds, '%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            continue
+        if t >= cutoff:
+            recent[int(k)] = d
+    return recent
+
+def _playoff_results_text(recent, hours=WINDOW_HOURS):
+    if not recent:
+        return None
+    lines = [f'⚽ <b>Плей-офф за {hours}ч</b>']
+    for idx in sorted(recent):
+        d = recent[idx]
+        tag = ROUND_TAG.get(bracket.round_of(idx), '')
+        lines.append(f"{tag}: {d['home']} {d['hs']}–{d['as']} {d['away']} → 🏆 {d['w']}")
+    return '\n'.join(lines)
+
+def _top_gainers_text(recent, hours=WINDOW_HOURS, top=3):
+    if not recent:
+        return None
+    gains = []
+    for name, sub in sheets.all_submissions().items():
+        picks = sub.get('picks', {}); g = 0.0; c = 0
+        for idx, d in recent.items():
+            if picks.get(str(idx)) == d['w']:
+                g += bracket.ROUND_POINTS[bracket.round_of(idx)]; c += 1
+        if g > 0:
+            gains.append((name, g, c))
+    if not gains:
+        return None
+    gains.sort(key=lambda r: (-r[1], -r[2], r[0]))
+    medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+    lines = [f'🔥 <b>Лучшие за {hours}ч</b>']
+    for i, (name, g, c) in enumerate(gains[:top], 1):
+        lines.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g} ({c})")
+    return '\n'.join(lines)
+
+def _digest_text(header):
+    """Daily digest: leaderboard + recent playoff results + top gainers of the window."""
+    recent = _recent_ko()
+    parts = [header + _fmt_lb(_leaderboard())]
+    res = _playoff_results_text(recent)
+    if res:
+        parts.append(res)
+    gain = _top_gainers_text(recent)
+    if gain:
+        parts.append(gain)
+    return '\n\n'.join(parts)
+
 def _norm(s):
     return (s or '').strip().lower()
 
 def _resolve_actual(matches):
-    """Map real finished matches onto the 31 bracket positions -> {idx: winner}."""
+    """Map real finished matches onto the 31 bracket positions.
+    Returns {idx: {'w': winner, 'home','away','hs','as','date'}}."""
     fin = [m for m in matches if m.get('hs') is not None and m.get('as') is not None]
     def winner_of(m):
         if m['hs'] > m['as']: return m['home']
@@ -168,21 +231,23 @@ def _resolve_actual(matches):
             if {_norm(m['home']), _norm(m['away'])} == s:
                 return m
         return None
-    actual = {}
+    info = {}
     for idx in range(bracket.TOTAL):
         if idx < 16:
             t0, t1 = bracket.R32_PAIRS[idx]
         else:
             f0, f1 = bracket.feeders(idx)
-            t0, t1 = actual.get(f0), actual.get(f1)
+            t0 = info.get(f0, {}).get('w'); t1 = info.get(f1, {}).get('w')
         if not t0 or not t1:
             continue
         m = find(t0, t1)
         if m:
             w = winner_of(m)
             if w:
-                actual[idx] = t0 if _norm(w) == _norm(t0) else t1
-    return actual
+                info[idx] = {'w': t0 if _norm(w) == _norm(t0) else t1,
+                             'home': m['home'], 'away': m['away'],
+                             'hs': m['hs'], 'as': m['as'], 'date': m.get('utcDate')}
+    return info
 
 async def _do_sync(ctx):
     if not (FD_TOKEN and results_api):
@@ -192,9 +257,11 @@ async def _do_sync(ctx):
     built = results_api.build_actual(matches)
     sheets.set_facts({'standings': built.get('standings', {}), 'tables': built.get('tables', {}),
                       'results': built.get('results', [])})
-    won = _resolve_actual(matches)
+    info = _resolve_actual(matches)                       # {idx: {w, home, away, hs, as, date}}
+    won = {i: d['w'] for i, d in info.items() if d.get('w')}
     if won:
         sheets.set_winners_bulk(won)
+        sheets.set_koinfo(info)
     return matches
 
 # ======================= scheduled jobs =======================
@@ -208,10 +275,7 @@ async def post_job(ctx: ContextTypes.DEFAULT_TYPE):
     if not GROUP_CHAT_ID:
         return
     today = dt.date.today().strftime('%d.%m')
-    msg = f'☀️ Сводка {today}\n\n' + _fmt_lb(_leaderboard())
-    facts = _facts_text()
-    if facts:
-        msg += '\n\n' + facts
+    msg = _digest_text(f'☀️ Сводка {today}\n\n')
     await ctx.bot.send_message(GROUP_CHAT_ID, msg, parse_mode='HTML', disable_web_page_preview=True)
 
 # ======================= admin =======================
@@ -233,10 +297,7 @@ async def post_cmd(update: Update, ctx):
         return
     target = GROUP_CHAT_ID or update.effective_chat.id
     today = dt.date.today().strftime('%d.%m')
-    msg = f'☀️ Сводка {today}\n\n' + _fmt_lb(_leaderboard())
-    facts = _facts_text()
-    if facts:
-        msg += '\n\n' + facts
+    msg = _digest_text(f'☀️ Сводка {today}\n\n')
     await ctx.bot.send_message(target, msg, parse_mode='HTML', disable_web_page_preview=True)
     if GROUP_CHAT_ID:
         await update.message.reply_text('✅ Отправил в группу.')
