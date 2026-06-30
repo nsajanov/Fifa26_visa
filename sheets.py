@@ -68,7 +68,10 @@ def get_submission(user_id):
         if not cell:
             return None
         row = _ws_players.row_values(cell.row)
-        return {'name': row[1], 'submission': json.loads(row[2])}
+        try:
+            return {'name': row[1], 'submission': json.loads(row[2])}
+        except Exception:
+            return None
     db = _load_local()
     return db['players'].get(str(user_id))
 
@@ -87,8 +90,11 @@ def all_submissions():
     if _use_sheets():
         _connect()
         for row in _ws_players.get_all_values()[1:]:
-            if len(row) >= 3 and row[2]:
-                out[row[1]] = json.loads(row[2])
+            if len(row) >= 3 and row[2] and row[1]:
+                try:
+                    out[row[1]] = json.loads(row[2])
+                except Exception:
+                    continue   # skip rows with broken/partial JSON instead of crashing
     else:
         for p in _load_local()['players'].values():
             out[p['name']] = p['submission']
@@ -112,9 +118,16 @@ def _state_set(key, value):
     else:
         db = _load_local(); db['state'][key] = value; _save_local(db)
 
+def _safe_json(raw, default):
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
 def get_actual():
-    raw = _state_get('actual', '')
-    return json.loads(raw) if raw else {'ko': {}}
+    return _safe_json(_state_get('actual', ''), {'ko': {}})
 
 def set_actual(actual):
     _state_set('actual', json.dumps({'ko': actual.get('ko', {})}, ensure_ascii=False))
@@ -130,8 +143,7 @@ def set_ko_winner(match_no, team):
     _state_set('actual', json.dumps(a, ensure_ascii=False))
 
 def get_facts():
-    raw = _state_get('facts', '')
-    return json.loads(raw) if raw else {}
+    return _safe_json(_state_get('facts', ''), {})
 
 def set_facts(facts):
     _state_set('facts', json.dumps(facts, ensure_ascii=False))
@@ -143,8 +155,7 @@ def set_deadline(value):
     _state_set('deadline', value)
 
 def get_winners():
-    raw = _state_get('winners', '')
-    return json.loads(raw) if raw else {}
+    return _safe_json(_state_get('winners', ''), {})
 
 def set_winner(idx, team):
     w = get_winners(); w[str(idx)] = team
