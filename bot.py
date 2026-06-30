@@ -24,12 +24,16 @@ TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))      # Almaty UTC+5
 def is_admin(uid):
     return uid in ADMIN_IDS
 
+def _utcnow():
+    """Naive UTC now (Python 3.12+ safe; replaces deprecated datetime.utcnow())."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
 def _deadline_passed():
     d = sheets.get_deadline()
     if not d:
         return False
     try:
-        return dt.datetime.utcnow() + dt.timedelta(hours=TZ_OFFSET) > dt.datetime.strptime(d, '%Y-%m-%d %H:%M')
+        return _utcnow() + dt.timedelta(hours=TZ_OFFSET) > dt.datetime.strptime(d, '%Y-%m-%d %H:%M')
     except ValueError:
         return False
 
@@ -187,7 +191,7 @@ ROUND_TAG = {0: '1/16', 1: '1/8', 2: '1/4', 3: '1/2', 4: 'Финал'}
 def _recent_ko(hours=WINDOW_HOURS):
     """{idx: match_detail} for playoff matches finished within the last `hours`."""
     info = sheets.get_koinfo()
-    cutoff = dt.datetime.utcnow() - dt.timedelta(hours=hours)
+    cutoff = _utcnow() - dt.timedelta(hours=hours)
     recent = {}
     for k, d in info.items():
         ds = d.get('date')
@@ -380,7 +384,7 @@ async def aw_cmd(update: Update, ctx):   # /aw <match 1-31> <team>
         sheets.set_winner(idx, team)
         home, away = bracket.R32_PAIRS[idx] if idx < 16 else (None, None)
         sheets.set_koinfo({idx: {'w': team, 'home': home, 'away': away, 'hs': None, 'as': None,
-                                 'date': dt.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}})
+                                 'date': _utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}})
         await update.message.reply_text(f'✅ Матч {m}: победитель {team}.')
     except Exception:
         await update.message.reply_text('Формат: /aw 1 Brazil  (номер матча 1–31)')
