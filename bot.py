@@ -133,8 +133,37 @@ def _fmt_lb(rows, top=20):
         out.append(f"{medals.get(i, str(i)+'.')} {name} — {t:g}")
     return '\n'.join(out) if len(out) > 1 else '🏆 Пока нет прогнозов.'
 
+def _performers_block(top=3):
+    """Top performers in the last DIGEST_HOURS window; falls back to overall playoff."""
+    recent = _recent_ko()
+    if recent:
+        return _top_gainers_text(recent, top=top)
+    won = sheets.get_winners()
+    if not won:
+        return None
+    gains = []
+    for name, sub in sheets.all_submissions().items():
+        picks = sub.get('picks', {}); g = 0.0
+        for k, team in won.items():
+            if picks.get(str(int(k))) == team:
+                g += bracket.ROUND_POINTS[bracket.round_of(int(k))]
+        if g > 0:
+            gains.append((name, g))
+    if not gains:
+        return None
+    gains.sort(key=lambda r: (-r[1], r[0]))
+    medals = {1: '🥇', 2: '🥈', 3: '🥉'}
+    lines = ['🔥 <b>Лучшие в плей-офф</b>']
+    for i, (name, g) in enumerate(gains[:top], 1):
+        lines.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g}")
+    return '\n'.join(lines)
+
 async def leaderboard_cmd(update: Update, ctx):
-    await update.message.reply_text(_fmt_lb(_leaderboard()))
+    msg = _fmt_lb(_leaderboard())
+    p = _performers_block()
+    if p:
+        msg += '\n\n' + p
+    await update.message.reply_text(msg, parse_mode='HTML')
 
 # ======================= results / facts =======================
 def _facts_text():
