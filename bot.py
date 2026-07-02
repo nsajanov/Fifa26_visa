@@ -30,6 +30,13 @@ WINDOW_HOURS = int(os.getenv('DIGEST_HOURS', '20'))
 ANNOUNCE = os.getenv('ANNOUNCE_RESULTS', '1') != '0'    # instant result cards to the group
 
 ROUND_TAG = {0: '1/16', 1: '1/8', 2: '1/4', 3: '1/2', 4: 'Финал'}
+
+# ---- «Угадай счёт» (score game, from R16 on) ----
+SP_EXACT, SP_OUTCOME, SP_DRAW = 3.0, 1.0, 3.0
+SP_SCORES = ['10', '20', '21', '31']            # winner-oriented score options
+SP_FROM_IDX = 16                                # R16 onward
+SP_POST_HOUR = int(os.getenv('SP_POST_HOUR', '11'))   # Almaty: cards open daily at 11:00
+SP_HORIZON_H = int(os.getenv('SP_HORIZON_H', '21'))   # covers matches 21:00 tonight … 07:00 tomorrow
 FLAGS = {
  'Germany': '🇩🇪', 'Paraguay': '🇵🇾', 'France': '🇫🇷', 'Sweden': '🇸🇪',
  'South Africa': '🇿🇦', 'Canada': '🇨🇦', 'Netherlands': '🇳🇱', 'Morocco': '🇲🇦',
@@ -99,6 +106,12 @@ async def on_callback(update: Update, ctx):
     q = update.callback_query
     if q.data == 'go':
         await q.answer(); await _begin(update, ctx); return
+    if q.data.startswith('spt:'):
+        await q.answer('🧪 Это тест-превью — голос не считается. В группе кнопки будут работать.',
+                       show_alert=False)
+        return
+    if q.data.startswith('sp:'):
+        await _on_sp_tap(update, ctx); return
     if q.data.startswith('p:'):
         _, sidx, choice = q.data.split(':'); idx = int(sidx)
         if ctx.user_data.get('idx') is None:
@@ -153,6 +166,207 @@ async def mybracket(update: Update, ctx):
             lines.append(f'<b>{nm}</b>: ' + ', '.join(ws))
     await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
 
+# ======================= score game («Угадай счёт») =======================
+def _json_state(key, default):
+    import json as _j
+    raw = sheets._state_get(key, '')
+    try:
+        return _j.loads(raw) if raw else default
+    except Exception:
+        return default
+
+def _set_json_state(key, val):
+    import json as _j
+    sheets._state_set(key, _j.dumps(val, ensure_ascii=False))
+
+def _sp_all():
+    """{idx: {uid: {'n': name, 't': 'h'/'a'/'d', 's': '21'}}}"""
+    return _json_state('sp', {})
+
+def _sp_meta():
+    """{idx: {'home','away','date','msg'(chat msg id)}} for posted cards."""
+    return _json_state('spmeta', {})
+
+def _uid_display_name(uid, fallback):
+    """Prefer the name from the players sheet so points merge into one row."""
+    try:
+        rows = sheets._player_rows()
+        if rows:
+            for r in rows:
+                if r and r[0] == str(uid) and len(r) > 1 and r[1]:
+                    return r[1]
+    except Exception:
+        pass
+    return fallback
+
+def _sp_points(pred, d):
+    """Points for one score prediction given decided koinfo d."""
+    dur = d.get('dur'); w = d.get('w'); hs, as_ = d.get('hs'), d.get('as')
+    if not w:
+        return 0.0
+    draw90 = dur in ('PENALTY_SHOOTOUT', 'EXTRA_TIME')
+    if pred.get('t') == 'd':
+        return SP_DRAW if draw90 else 0.0
+    team = d.get('home') if pred.get('t') == 'h' else d.get('away')
+    if canon(team) != canon(w):
+        return 0.0
+    if draw90 or hs is None:
+        return SP_OUTCOME
+    ws, ls = (hs, as_) if canon(w) == canon(d.get('home')) else (as_, hs)
+    return SP_EXACT if f'{ws}{ls}' == pred.get('s') else SP_OUTCOME
+
+def _sp_totals():
+    """{name: score_game_points} over all decided matches."""
+    sp = _sp_all(); meta = _sp_meta(); koinfo = sheets.get_koinfo()
+    totals = {}
+    for sidx, preds in sp.items():
+        d = koinfo.get(sidx)
+        if not d or not d.get('w'):
+            continue
+        for uid, p in preds.items():
+            pts = _sp_points(p, d)
+            if pts:
+                nm = p.get('n', uid)
+                totals[nm] = totals.get(nm, 0.0) + pts
+    return totals
+
+def _sp_card_text(idx, h, a, date_utc, sp=None):
+    t_loc = ''
+    try:
+        t = dt.datetime.strptime(date_utc, '%Y-%m-%dT%H:%M:%SZ')
+        t_loc = (t + dt.timedelta(hours=TZ_OFFSET)).strftime('%d.%m %H:%M')
+    except Exception:
+        pass
+    tag = ROUND_TAG.get(bracket.round_of(idx), '')
+    lines = [f'🎯 <b>УГАДАЙ СЧЁТ · {tag}</b>',
+             f'{T(h)}  🆚  {T(a)}',
+             f'🕘 {t_loc} (Алматы) · приём до стартового свистка',
+             '',
+             'Точный счёт <b>+3</b> · исход <b>+1</b> · ничья в 90 мин <b>+3</b>']
+    preds = (sp or _sp_all()).get(str(idx), {})
+    if preds:
+        nh = sum(1 for p in preds.values() if p.get('t') == 'h')
+        na = sum(1 for p in preds.values() if p.get('t') == 'a')
+        nd = sum(1 for p in preds.values() if p.get('t') == 'd')
+        lines.append(f'📊 Голоса: {h} {nh} · ничья {nd} · {a} {na}')
+    return '\n'.join(lines)
+
+def _sp_keyboard(idx, h, a, test=False):
+    pref = 'spt' if test else 'sp'
+    def row(side, team):
+        return [InlineKeyboardButton(f'{FLAGS.get(team, "")} {s[0]}:{s[1]}',
+                                     callback_data=f'{pref}:{idx}:{side}:{s}') for s in SP_SCORES]
+    return InlineKeyboardMarkup([
+        row('h', h),
+        row('a', a),
+        [InlineKeyboardButton('🤝 Ничья в 90 мин (пенальти)', callback_data=f'{pref}:{idx}:d:00')],
+    ])
+
+async def _post_sp_cards(ctx, chat_id, horizon_h=SP_HORIZON_H, test=False):
+    """Post prediction cards for bracket matches kicking off within horizon.
+    test=True: preview only — nothing saved, taps don't count."""
+    ups = _json_state('upcoming', [])
+    meta = _sp_meta()
+    now = _utcnow(); posted = 0
+    for u in ups:
+        idx = u['idx']
+        if idx < SP_FROM_IDX or (not test and str(idx) in meta):
+            continue
+        try:
+            t = dt.datetime.strptime(u['date'], '%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            continue
+        if not (now <= t <= now + dt.timedelta(hours=horizon_h)):
+            continue
+        txt = _sp_card_text(idx, u['home'], u['away'], u['date'])
+        if test:
+            txt = '🧪 <b>ТЕСТ-ПРЕВЬЮ</b> (в группу не уходит, тапы не считаются)\n\n' + txt
+        msg = await ctx.bot.send_message(chat_id, txt, parse_mode='HTML',
+                                         reply_markup=_sp_keyboard(idx, u['home'], u['away'], test=test))
+        if not test:
+            meta[str(idx)] = {'home': u['home'], 'away': u['away'], 'date': u['date'],
+                              'chat': msg.chat_id, 'msg': msg.message_id}
+        posted += 1
+    if posted and not test:
+        _set_json_state('spmeta', meta)
+    return posted
+
+async def sp_post_job(ctx: ContextTypes.DEFAULT_TYPE):
+    if not GROUP_CHAT_ID:
+        return
+    try:
+        await _post_sp_cards(ctx, GROUP_CHAT_ID)
+    except Exception:
+        logging.exception('sp_post_job failed')
+
+async def spost_cmd(update: Update, ctx):
+    """Admin: /spost — open cards in the group; /spost test — private preview."""
+    if not is_admin(update.effective_user.id):
+        return
+    test = bool(ctx.args) and ctx.args[0].lower() == 'test'
+    target = update.effective_chat.id if test else (GROUP_CHAT_ID or update.effective_chat.id)
+    n = await _post_sp_cards(ctx, target, horizon_h=30, test=test)
+    tail = ' (тест — только тебе)' if test else ''
+    await update.message.reply_text(f'✅ Карточек: {n}{tail}' if n
+                                    else 'Нет подходящих матчей в ближайшие 30ч (или карточки уже открыты).')
+
+async def _on_sp_tap(update: Update, ctx):
+    q = update.callback_query
+    try:
+        _, sidx, side, s = q.data.split(':')
+        idx = int(sidx)
+    except Exception:
+        await q.answer(); return
+    meta = _sp_meta().get(sidx)
+    if not meta:
+        await q.answer('Этот матч уже закрыт.', show_alert=True); return
+    try:
+        kickoff = dt.datetime.strptime(meta['date'], '%Y-%m-%dT%H:%M:%SZ')
+        if _utcnow() >= kickoff:
+            await q.answer('⛔ Матч уже начался — приём закрыт.', show_alert=True); return
+    except Exception:
+        pass
+    uid = q.from_user.id
+    name = _uid_display_name(uid, q.from_user.full_name)
+    sp = _sp_all()
+    sp.setdefault(sidx, {})[str(uid)] = {'n': name, 't': side, 's': s}
+    _set_json_state('sp', sp)
+    if side == 'd':
+        human = 'ничья в 90 мин (пенальти)'
+    else:
+        team = meta['home'] if side == 'h' else meta['away']
+        human = f'{team} {s[0]}:{s[1]}'
+    await q.answer(f'✅ Принято: {human}')
+    try:
+        await q.edit_message_text(_sp_card_text(idx, meta['home'], meta['away'], meta['date'], sp=sp),
+                                  parse_mode='HTML',
+                                  reply_markup=_sp_keyboard(idx, meta['home'], meta['away']))
+    except Exception:
+        pass   # unchanged text / rate limit — not critical
+
+def _sp_award_lines(idx, d):
+    """Result lines for the score game: exact-score heroes + outcome count."""
+    preds = _sp_all().get(str(idx), {})
+    if not preds:
+        return []
+    exact, outcome, draw_heroes = [], 0, []
+    for uid, p in preds.items():
+        pts = _sp_points(p, d)
+        if pts == SP_EXACT and p.get('t') != 'd':
+            exact.append(p.get('n', uid))
+        elif pts == SP_DRAW and p.get('t') == 'd':
+            draw_heroes.append(p.get('n', uid))
+        elif pts == SP_OUTCOME:
+            outcome += 1
+    out = []
+    if exact:
+        out.append(f'💎 Точный счёт (+{SP_EXACT:g}): <b>{", ".join(sorted(exact))}</b>')
+    if draw_heroes:
+        out.append(f'🤝 Угадали ничью (+{SP_DRAW:g}): <b>{", ".join(sorted(draw_heroes))}</b>')
+    if outcome:
+        out.append(f'✅ Угадали исход (+{SP_OUTCOME:g}): {outcome} чел.')
+    return out
+
 # ======================= scoring / leaderboard =======================
 def _score(picks, actual):
     total = 0.0; correct = 0
@@ -164,24 +378,27 @@ def _score(picks, actual):
     return total, correct
 
 def _leaderboard():
+    """Rows: (name, total, correct, bracket_pts, score_game_pts)."""
     actual = sheets.get_winners()
     subs = sheets.all_submissions()
-    rows = [(name, *_score(sub.get('picks', {}), actual)) for name, sub in subs.items()]
+    spt = _sp_totals()
+    rows = []
+    seen = set()
+    for name, sub in subs.items():
+        br, c = _score(sub.get('picks', {}), actual)
+        sg = spt.get(name, 0.0)
+        rows.append((name, br + sg, c, br, sg)); seen.add(name)
+    for name, sg in spt.items():            # score-game players without a bracket
+        if name not in seen:
+            rows.append((name, sg, 0, 0.0, sg))
     rows.sort(key=lambda r: (-r[1], -r[2], r[0]))
     return rows
 
 def _prev_ranks():
-    import json as _j
-    raw = sheets._state_get('lbprev', '')
-    try:
-        return _j.loads(raw) if raw else {}
-    except Exception:
-        return {}
+    return _json_state('lbprev', {})
 
 def _store_ranks(rows):
-    import json as _j
-    sheets._state_set('lbprev', _j.dumps({name: i for i, (name, _, _) in enumerate(rows, 1)},
-                                         ensure_ascii=False))
+    _set_json_state('lbprev', {r[0]: i for i, r in enumerate(rows, 1)})
 
 def _arrow(name, cur_rank, prev):
     p = prev.get(name)
@@ -189,12 +406,16 @@ def _arrow(name, cur_rank, prev):
         return ''
     return f' ⬆️{p - cur_rank}' if p > cur_rank else f' ⬇️{cur_rank - p}'
 
-def _fmt_lb(rows, top=10, arrows=True):
+def _fmt_lb(rows, top=10, arrows=True, detail=False):
     medals = {1: '🥇', 2: '🥈', 3: '🥉'}
     prev = _prev_ranks() if arrows else {}
     out = ['🏆 <b>Таблица лидеров</b>']
-    for i, (name, t, c) in enumerate(rows[:top], 1):
-        out.append(f"{medals.get(i, str(i)+'.')} {name} — <b>{t:g}</b>{_arrow(name, i, prev)}")
+    for i, r in enumerate(rows[:top], 1):
+        name, t = r[0], r[1]
+        extra = ''
+        if detail and len(r) >= 5 and r[4]:
+            extra = f' <i>(сетка {r[3]:g} + счёт {r[4]:g})</i>'
+        out.append(f"{medals.get(i, str(i)+'.')} {name} — <b>{t:g}</b>{_arrow(name, i, prev)}{extra}")
     rest = len(rows) - top
     if rest > 0:
         out.append(f'<i>…и ещё {rest} — полная таблица: /leaderboard</i>')
@@ -202,7 +423,7 @@ def _fmt_lb(rows, top=10, arrows=True):
 
 async def leaderboard_cmd(update: Update, ctx):
     rows = _leaderboard()
-    msg = _fmt_lb(rows, top=len(rows) or 1)
+    msg = _fmt_lb(rows, top=len(rows) or 1, detail=True)
     recent = _recent_ko()
     g = _top_gainers_text(recent) if recent else None
     if g:
@@ -470,6 +691,8 @@ async def _announce(ctx, new):
     lines = ['⚡️ <b>Результат!</b>']
     for idx in sorted(new):
         lines.append(_result_line(idx, new[idx]))
+        if idx >= SP_FROM_IDX:
+            lines.extend(_sp_award_lines(idx, new[idx]))
     try:
         await ctx.bot.send_message(GROUP_CHAT_ID, '\n'.join(lines), parse_mode='HTML',
                                    disable_web_page_preview=True)
@@ -539,15 +762,19 @@ async def diag_cmd(update: Update, ctx):
     await update.message.reply_text(txt)
 
 async def post_cmd(update: Update, ctx):
+    """Admin: /post — digest to the group; /post test — private preview (group untouched)."""
     if not is_admin(update.effective_user.id):
         return
-    target = GROUP_CHAT_ID or update.effective_chat.id
+    test = bool(ctx.args) and ctx.args[0].lower() == 'test'
+    target = update.effective_chat.id if test else (GROUP_CHAT_ID or update.effective_chat.id)
     today = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TZ_OFFSET)).strftime('%d.%m')
-    msg = _digest_text(f'🏟 <b>ЧМ-2026 · Сводка {today}</b>\n\n')
+    head = '🧪 <b>ТЕСТ-ПРЕВЬЮ</b> (в группу не уходит)\n\n' if test else ''
+    msg = _digest_text(head + f'🏟 <b>ЧМ-2026 · Сводка {today}</b>\n\n')
     await ctx.bot.send_message(target, msg, parse_mode='HTML', disable_web_page_preview=True)
-    _store_ranks(_leaderboard())
-    if GROUP_CHAT_ID:
-        await update.message.reply_text('✅ Отправил в группу.')
+    if not test:
+        _store_ranks(_leaderboard())
+        if GROUP_CHAT_ID:
+            await update.message.reply_text('✅ Отправил в группу.')
 
 async def aw_cmd(update: Update, ctx):   # /aw <match 1-31> <team>
     if not is_admin(update.effective_user.id):
@@ -615,7 +842,8 @@ def main():
     for cmd, fn in [('start', start), ('restart', restart), ('mybracket', mybracket),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd), ('sync', sync_cmd),
                     ('post', post_cmd), ('aw', aw_cmd), ('reset', reset_cmd), ('setdeadline', setdeadline_cmd),
-                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('diag', diag_cmd)]:
+                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('diag', diag_cmd),
+                    ('spost', spost_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_callback))
 
@@ -626,7 +854,8 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(sync_job, interval=SYNC_EVERY_H * 3600, first=30)
         app.job_queue.run_daily(post_job, time=dt.time(hour=(POST_HOUR - TZ_OFFSET) % 24, minute=0))
-        print(f'Scheduled: sync every {SYNC_EVERY_H}h (+30s after start) / post {POST_HOUR}:00 Almaty.')
+        app.job_queue.run_daily(sp_post_job, time=dt.time(hour=(SP_POST_HOUR - TZ_OFFSET) % 24, minute=0))
+        print(f'Scheduled: sync every {SYNC_EVERY_H}h / post {POST_HOUR}:00 / score-cards {SP_POST_HOUR}:00 Almaty.')
     else:
         print('WARNING: job_queue is None. Add python-telegram-bot[job-queue] to requirements.')
     print('Bot running…')
