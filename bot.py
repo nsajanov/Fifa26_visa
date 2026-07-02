@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """WC 2026 Playoff Predictor — in-chat buttons + automatic results.
-Players predict by tapping who advances, right in the chat (no mini-app).
-The bot auto-pulls real results (football-data.org) at SYNC_HOUR and posts the
-results + leaderboard to the group at POST_HOUR (Almaty time)."""
-import os, asyncio, datetime as dt
+v3 fixes & UX:
+  * penalty shootouts resolve correctly (score.winner / penalties from API)
+  * robust team-name matching (Cote d'Ivoire, DR Congo, Bosnia...)
+  * sync every SYNC_EVERY_H hours (default 2) — not once a day
+  * instant result cards posted to the group as soon as a match is decided
+  * redesigned digest: flags, scores & pens, who-guessed counts, leaderboard
+    with movement arrows, champion-alive block, upcoming matches with pick split
+  * /diag for one-tap health check"""
+import os, re, asyncio, logging, datetime as dt
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler, ContextTypes)
 
@@ -17,15 +22,33 @@ BOT_TOKEN = os.environ['BOT_TOKEN']
 ADMIN_IDS = {int(x) for x in os.getenv('ADMIN_IDS', '').replace(' ', '').split(',') if x.strip().isdigit()}
 GROUP_CHAT_ID = os.getenv('GROUP_CHAT_ID', '')
 FD_TOKEN = os.getenv('FOOTBALL_DATA_TOKEN', '')
-SYNC_HOUR = int(os.getenv('SYNC_HOUR', '10'))
+SYNC_HOUR = int(os.getenv('SYNC_HOUR', '10'))          # kept for compatibility
 POST_HOUR = int(os.getenv('POST_HOUR', '11'))
-TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))      # Almaty UTC+5
+TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))            # Almaty UTC+5
+SYNC_EVERY_H = int(os.getenv('SYNC_EVERY_H', '2'))      # NEW: sync cadence, hours
+WINDOW_HOURS = int(os.getenv('DIGEST_HOURS', '20'))
+ANNOUNCE = os.getenv('ANNOUNCE_RESULTS', '1') != '0'    # instant result cards to the group
+
+ROUND_TAG = {0: '1/16', 1: '1/8', 2: '1/4', 3: '1/2', 4: 'Финал'}
+FLAGS = {
+ 'Germany': '🇩🇪', 'Paraguay': '🇵🇾', 'France': '🇫🇷', 'Sweden': '🇸🇪',
+ 'South Africa': '🇿🇦', 'Canada': '🇨🇦', 'Netherlands': '🇳🇱', 'Morocco': '🇲🇦',
+ 'Portugal': '🇵🇹', 'Croatia': '🇭🇷', 'Spain': '🇪🇸', 'Austria': '🇦🇹',
+ 'United States': '🇺🇸', 'Bosnia and Herzegovina': '🇧🇦', 'Belgium': '🇧🇪', 'Senegal': '🇸🇳',
+ 'Brazil': '🇧🇷', 'Japan': '🇯🇵', "Cote d'Ivoire": '🇨🇮', 'Norway': '🇳🇴',
+ 'Mexico': '🇲🇽', 'Ecuador': '🇪🇨', 'England': '🏴󠁧󠁢󠁥󠁮󠁧󠁿', 'DR Congo': '🇨🇩',
+ 'Argentina': '🇦🇷', 'Cabo Verde': '🇨🇻', 'Australia': '🇦🇺', 'Egypt': '🇪🇬',
+ 'Switzerland': '🇨🇭', 'Algeria': '🇩🇿', 'Colombia': '🇨🇴', 'Ghana': '🇬🇭',
+}
+
+def T(team):
+    """Team with flag."""
+    return f"{FLAGS.get(team, '')} {team}".strip()
 
 def is_admin(uid):
     return uid in ADMIN_IDS
 
 def _utcnow():
-    """Naive UTC now (Python 3.12+ safe; replaces deprecated datetime.utcnow())."""
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 def _deadline_passed():
@@ -37,9 +60,19 @@ def _deadline_passed():
     except ValueError:
         return False
 
+def canon(s):
+    """Aggressive normalization so \"Cote d'Ivoire\" == 'Cote d Ivoire' == 'Côte d’Ivoire'."""
+    s = (s or '').lower()
+    s = (s.replace('ô', 'o').replace('é', 'e').replace('ç', 'c').replace('ü', 'u')
+          .replace('ö', 'o').replace('ã', 'a').replace('í', 'i').replace('’', ''))
+    s = re.sub(r'[^a-z]', '', s)
+    s = s.replace('congodr', 'drcongo').replace('capeverde', 'caboverde')
+    s = s.replace('ivorycoast', 'cotedivoire').replace('turkey', 'turkiye')
+    s = s.replace('czechrepublic', 'czechia').replace('korearepublic', 'southkorea')
+    return s
+
 # ======================= prediction flow (buttons) =======================
 async def start(update: Update, ctx):
-    # одно нажатие START -> сразу первый матч, без лишних кнопок
     await update.message.reply_text(
         '⚽ Прогноз плей-офф ЧМ-2026! Жми, кто проходит дальше — и так до чемпиона.\n'
         'Переделать — /restart · мой прогноз — /mybracket · таблица — /leaderboard')
@@ -105,91 +138,105 @@ async def mybracket(update: Update, ctx):
         await update.message.reply_text('У тебя пока нет прогноза. Нажми /start.')
         return
     picks = {int(k): v for k, v in sub['submission']['picks'].items()}
+    won = sheets.get_winners()
     lines = ['📋 Твой прогноз:']
     for r, nm in enumerate(bracket.ROUND_NAMES):
-        ws = [picks[i] for i in range(bracket.OFFSETS[r], bracket.OFFSETS[r] + bracket.ROUND_SIZES[r]) if i in picks]
+        ws = []
+        for i in range(bracket.OFFSETS[r], bracket.OFFSETS[r] + bracket.ROUND_SIZES[r]):
+            if i not in picks:
+                continue
+            mark = ''
+            if str(i) in won and won[str(i)]:
+                mark = ' ✅' if canon(won[str(i)]) == canon(picks[i]) else ' ❌'
+            ws.append(picks[i] + mark)
         if ws:
             lines.append(f'<b>{nm}</b>: ' + ', '.join(ws))
     await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
 
 # ======================= scoring / leaderboard =======================
-def _score(picks, actual=None):
-    if actual is None:
-        actual = sheets.get_winners()
+def _score(picks, actual):
     total = 0.0; correct = 0
     for k, team in picks.items():
         i = int(k)
-        if actual.get(str(i)) and actual[str(i)] == team:
+        w = actual.get(str(i))
+        if w and canon(w) == canon(team):
             total += bracket.ROUND_POINTS[bracket.round_of(i)]; correct += 1
     return total, correct
 
 def _leaderboard():
-    actual = sheets.get_winners()                      # fetch ONCE, not per player
-    subs = sheets.all_submissions()                    # cached read
+    actual = sheets.get_winners()
+    subs = sheets.all_submissions()
     rows = [(name, *_score(sub.get('picks', {}), actual)) for name, sub in subs.items()]
     rows.sort(key=lambda r: (-r[1], -r[2], r[0]))
     return rows
 
-def _fmt_lb(rows, top=20):
+def _prev_ranks():
+    import json as _j
+    raw = sheets._state_get('lbprev', '')
+    try:
+        return _j.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+def _store_ranks(rows):
+    import json as _j
+    sheets._state_set('lbprev', _j.dumps({name: i for i, (name, _, _) in enumerate(rows, 1)},
+                                         ensure_ascii=False))
+
+def _arrow(name, cur_rank, prev):
+    p = prev.get(name)
+    if p is None or p == cur_rank:
+        return ''
+    return f' ⬆️{p - cur_rank}' if p > cur_rank else f' ⬇️{cur_rank - p}'
+
+def _fmt_lb(rows, top=10, arrows=True):
     medals = {1: '🥇', 2: '🥈', 3: '🥉'}
-    out = ['🏆 Таблица лидеров']
+    prev = _prev_ranks() if arrows else {}
+    out = ['🏆 <b>Таблица лидеров</b>']
     for i, (name, t, c) in enumerate(rows[:top], 1):
-        out.append(f"{medals.get(i, str(i)+'.')} {name} — {t:g}")
+        out.append(f"{medals.get(i, str(i)+'.')} {name} — <b>{t:g}</b>{_arrow(name, i, prev)}")
+    rest = len(rows) - top
+    if rest > 0:
+        out.append(f'<i>…и ещё {rest} — полная таблица: /leaderboard</i>')
     return '\n'.join(out) if len(out) > 1 else '🏆 Пока нет прогнозов.'
 
-def _performers_block(top=3):
-    """Top performers in the last DIGEST_HOURS window; falls back to overall playoff."""
-    recent = _recent_ko()
-    if recent:
-        return _top_gainers_text(recent, top=top)
-    won = sheets.get_winners()
-    if not won:
-        return None
-    gains = []
-    for name, sub in sheets.all_submissions().items():
-        picks = sub.get('picks', {}); g = 0.0
-        for k, team in won.items():
-            if picks.get(str(int(k))) == team:
-                g += bracket.ROUND_POINTS[bracket.round_of(int(k))]
-        if g > 0:
-            gains.append((name, g))
-    if not gains:
-        return None
-    gains.sort(key=lambda r: (-r[1], r[0]))
-    medals = {1: '🥇', 2: '🥈', 3: '🥉'}
-    lines = ['🔥 <b>Лучшие в плей-офф</b>']
-    for i, (name, g) in enumerate(gains[:top], 1):
-        lines.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g}")
-    return '\n'.join(lines)
-
 async def leaderboard_cmd(update: Update, ctx):
-    msg = _fmt_lb(_leaderboard())
-    p = _performers_block()
-    if p:
-        msg += '\n\n' + p
+    rows = _leaderboard()
+    msg = _fmt_lb(rows, top=len(rows) or 1)
+    recent = _recent_ko()
+    g = _top_gainers_text(recent) if recent else None
+    if g:
+        msg += '\n\n' + g
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# ======================= results / facts =======================
-def _facts_text():
-    facts = sheets.get_facts(); tb = facts.get('tables') or {}
-    if not tb:
-        return None
-    lines = ['📋 <b>Группы — места и очки</b>']
-    for g in 'ABCDEFGHIJKL':
-        rows = tb.get(g, [])
-        if rows:
-            lines.append(f"<b>{g}</b>: " + ' · '.join(f"{i+1}.{r['team']} {r['pts']}" for i, r in enumerate(rows)))
-    return '\n'.join(lines)
+# ======================= results / digest =======================
+def _guessed(idx, winner):
+    """How many players picked `winner` at bracket position idx."""
+    subs = sheets.all_submissions()
+    n = sum(1 for _, sub in subs.items()
+            if canon(sub.get('picks', {}).get(str(idx), '')) == canon(winner))
+    return n, len(subs)
 
-async def facts_cmd(update: Update, ctx):
-    t = _facts_text()
-    await update.message.reply_text(t or 'Фактов пока нет — будут после /sync.', parse_mode='HTML')
-
-WINDOW_HOURS = int(os.getenv('DIGEST_HOURS', '20'))
-ROUND_TAG = {0: '1/16', 1: '1/8', 2: '1/4', 3: '1/2', 4: 'Финал'}
+def _result_line(idx, d, with_guessed=True):
+    tag = ROUND_TAG.get(bracket.round_of(idx), '')
+    w = d.get('w', '')
+    if d.get('hs') is not None:
+        pens = ''
+        if d.get('ph') is not None and d.get('pa') is not None:
+            pens = f" · пен. {d['ph']}–{d['pa']}"
+        elif d.get('dur') == 'PENALTY_SHOOTOUT':
+            pens = ' · по пенальти'
+        elif d.get('dur') == 'EXTRA_TIME':
+            pens = ' · доп. время'
+        line = f"{tag} · {T(d['home'])} <b>{d['hs']}–{d['as']}</b> {T(d['away'])}{pens} → 🏆 <b>{w}</b>"
+    else:
+        line = f"{tag} · 🏆 <b>{T(w)}</b>"
+    if with_guessed and w:
+        n, tot = _guessed(idx, w)
+        line += f'\n      🎯 угадали: {n}/{tot}'
+    return line
 
 def _recent_ko(hours=WINDOW_HOURS):
-    """{idx: match_detail} for playoff matches finished within the last `hours`."""
     info = sheets.get_koinfo()
     cutoff = _utcnow() - dt.timedelta(hours=hours)
     recent = {}
@@ -208,14 +255,9 @@ def _recent_ko(hours=WINDOW_HOURS):
 def _playoff_results_text(recent, hours=WINDOW_HOURS):
     if not recent:
         return None
-    lines = [f'⚽ <b>Плей-офф за {hours}ч</b>']
+    lines = [f'⚽ <b>Результаты за {hours}ч</b>']
     for idx in sorted(recent):
-        d = recent[idx]
-        tag = ROUND_TAG.get(bracket.round_of(idx), '')
-        if d.get('hs') is not None:
-            lines.append(f"{tag}: {d['home']} {d['hs']}–{d['as']} {d['away']} → 🏆 {d['w']}")
-        else:
-            lines.append(f"{tag}: 🏆 {d['w']}")
+        lines.append(_result_line(idx, recent[idx]))
     return '\n'.join(lines)
 
 def _top_gainers_text(recent, hours=WINDOW_HOURS, top=3):
@@ -225,7 +267,7 @@ def _top_gainers_text(recent, hours=WINDOW_HOURS, top=3):
     for name, sub in sheets.all_submissions().items():
         picks = sub.get('picks', {}); g = 0.0; c = 0
         for idx, d in recent.items():
-            if picks.get(str(idx)) == d['w']:
+            if canon(picks.get(str(idx), '')) == canon(d.get('w', '')):
                 g += bracket.ROUND_POINTS[bracket.round_of(idx)]; c += 1
         if g > 0:
             gains.append((name, g, c))
@@ -238,43 +280,84 @@ def _top_gainers_text(recent, hours=WINDOW_HOURS, top=3):
         lines.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g}")
     return '\n'.join(lines)
 
-def _playoff_overall_text(top=3):
-    """Fallback when no timed results yet: show all decided playoff winners
-    (with score if known) + top performers by total playoff points."""
+def _playoff_overall_text():
     won = sheets.get_winners()
     if not won:
         return None
     koinfo = sheets.get_koinfo()
     lines = ['⚽ <b>Плей-офф — сыграно</b>']
-    for idx in sorted(int(k) for k in won):
-        tag = ROUND_TAG.get(bracket.round_of(idx), '')
-        d = koinfo.get(str(idx)) or {}
-        if d.get('hs') is not None:
-            lines.append(f"{tag}: {d['home']} {d['hs']}–{d['as']} {d['away']} → 🏆 {won[str(idx)]}")
-        else:
-            lines.append(f"{tag}: 🏆 {won[str(idx)]}")
-    gains = []
-    for name, sub in sheets.all_submissions().items():
-        picks = sub.get('picks', {}); g = 0.0
-        for k, team in won.items():
-            if picks.get(str(int(k))) == team:
-                g += bracket.ROUND_POINTS[bracket.round_of(int(k))]
-        if g > 0:
-            gains.append((name, g))
-    block = '\n'.join(lines)
-    if gains:
-        gains.sort(key=lambda r: (-r[1], r[0]))
-        medals = {1: '🥇', 2: '🥈', 3: '🥉'}
-        gl = ['🔥 <b>Лучшие в плей-офф</b>']
-        for i, (name, g) in enumerate(gains[:top], 1):
-            gl.append(f"{medals.get(i, str(i)+'.')} {name} +{g:g}")
-        block += '\n\n' + '\n'.join(gl)
-    return block
+    for idx in sorted(int(k) for k in won if won[k]):
+        d = dict(koinfo.get(str(idx)) or {})
+        d.setdefault('w', won[str(idx)])
+        lines.append(_result_line(idx, d, with_guessed=False))
+    return '\n'.join(lines)
+
+def _eliminated():
+    """Set of canon() team names knocked out (loser of every decided KO match)."""
+    out = set()
+    for k, d in sheets.get_koinfo().items():
+        w, h, a = d.get('w'), d.get('home'), d.get('away')
+        if w and h and a:
+            out.add(canon(a) if canon(w) == canon(h) else canon(h))
+    return out
+
+def _champion_block():
+    subs = sheets.all_submissions()
+    if not subs:
+        return None
+    dead = _eliminated()
+    alive, lost = {}, {}
+    for _, sub in subs.items():
+        ch = sub.get('champion') or sub.get('picks', {}).get('30')
+        if not ch:
+            continue
+        bucket = lost if canon(ch) in dead else alive
+        bucket[ch] = bucket.get(ch, 0) + 1
+    if not alive and not lost:
+        return None
+    parts = []
+    if alive:
+        top = sorted(alive.items(), key=lambda kv: -kv[1])
+        parts.append('👑 <b>Чемпионские ставки живы:</b> ' +
+                     ' · '.join(f'{T(t)} — {n}' for t, n in top[:5]))
+    if lost:
+        gone = sorted(lost.items(), key=lambda kv: -kv[1])
+        parts.append('💀 <b>Чемпион уже выбыл у:</b> ' +
+                     ' · '.join(f'{T(t)} — {n}' for t, n in gone[:5]))
+    return '\n'.join(parts)
+
+def _upcoming_block(hours=36):
+    import json as _j
+    raw = sheets._state_get('upcoming', '')
+    try:
+        ups = _j.loads(raw) if raw else []
+    except Exception:
+        ups = []
+    if not ups:
+        return None
+    now = _utcnow(); horizon = now + dt.timedelta(hours=hours)
+    subs = sheets.all_submissions()
+    lines = []
+    for u in ups:
+        try:
+            t = dt.datetime.strptime(u['date'], '%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            continue
+        if not (now - dt.timedelta(hours=3) <= t <= horizon):
+            continue
+        idx = u['idx']; h, a = u['home'], u['away']
+        nh = sum(1 for s in subs.values() if canon(s.get('picks', {}).get(str(idx), '')) == canon(h))
+        na = sum(1 for s in subs.values() if canon(s.get('picks', {}).get(str(idx), '')) == canon(a))
+        loc = (t + dt.timedelta(hours=TZ_OFFSET)).strftime('%d.%m %H:%M')
+        lines.append(f"{ROUND_TAG.get(bracket.round_of(idx),'')} · {T(h)} vs {T(a)} · {loc}"
+                     f"\n      голоса группы: {nh}–{na}")
+    if not lines:
+        return None
+    return '📅 <b>Ближайшие матчи</b> (время Алматы)\n' + '\n'.join(lines)
 
 def _digest_text(header):
-    """Daily digest: leaderboard + playoff results. Uses the timed 'last Nh' blocks
-    when sync has real scored results; otherwise falls back to overall playoff so far."""
-    parts = [header + _fmt_lb(_leaderboard())]
+    rows = _leaderboard()
+    parts = [header + _fmt_lb(rows, top=10)]
     recent = _recent_ko()
     if recent:
         parts.append(_playoff_results_text(recent))
@@ -285,24 +368,33 @@ def _digest_text(header):
         fb = _playoff_overall_text()
         if fb:
             parts.append(fb)
+    ch = _champion_block()
+    if ch:
+        parts.append(ch)
+    up = _upcoming_block()
+    if up:
+        parts.append(up)
     return '\n\n'.join(p for p in parts if p)
 
-def _norm(s):
-    return (s or '').strip().lower()
-
+# ======================= sync =======================
 def _resolve_actual(matches):
-    """Map real finished matches onto the 31 bracket positions.
-    Returns {idx: {'w': winner, 'home','away','hs','as','date'}}."""
-    fin = [m for m in matches if m.get('hs') is not None and m.get('as') is not None]
-    def winner_of(m):
+    """Map real DECIDED matches onto the 31 bracket positions.
+    Handles extra time and penalty shootouts via score.winner/penalties."""
+    fin = [m for m in matches if m.get('status') == 'FINISHED' or
+           (m.get('status') is None and m.get('hs') is not None and m.get('as') is not None)]
+    def find(t0, t1):
+        s = {canon(t0), canon(t1)}
+        for m in fin:
+            if {canon(m['home']), canon(m['away'])} == s:
+                return m
+        return None
+    def decided_winner(m):
+        if results_api is not None:
+            return results_api.match_winner(m)
+        if m['hs'] is None or m['as'] is None:
+            return None
         if m['hs'] > m['as']: return m['home']
         if m['as'] > m['hs']: return m['away']
-        return None
-    def find(t0, t1):
-        s = {_norm(t0), _norm(t1)}
-        for m in fin:
-            if {_norm(m['home']), _norm(m['away'])} == s:
-                return m
         return None
     info = {}
     for idx in range(bracket.TOTAL):
@@ -314,42 +406,91 @@ def _resolve_actual(matches):
         if not t0 or not t1:
             continue
         m = find(t0, t1)
-        if m:
-            w = winner_of(m)
-            if w:
-                info[idx] = {'w': t0 if _norm(w) == _norm(t0) else t1,
-                             'home': m['home'], 'away': m['away'],
-                             'hs': m['hs'], 'as': m['as'], 'date': m.get('utcDate')}
+        if not m:
+            continue
+        w = decided_winner(m)
+        if not w:
+            continue
+        home_is_t0 = canon(m['home']) == canon(t0)
+        info[idx] = {'w': t0 if canon(w) == canon(t0) else t1,
+                     'home': t0 if home_is_t0 else t1,
+                     'away': t1 if home_is_t0 else t0,
+                     'hs': m['hs'] if home_is_t0 else m['as'],
+                     'as': m['as'] if home_is_t0 else m['hs'],
+                     'ph': (m.get('ph') if home_is_t0 else m.get('pa')),
+                     'pa': (m.get('pa') if home_is_t0 else m.get('ph')),
+                     'dur': m.get('duration'), 'date': m.get('utcDate')}
     return info
 
+def _upcoming_from(matches, info):
+    """Scheduled matches that map onto bracket positions whose teams are known."""
+    ups = []
+    sched = [m for m in matches if m.get('status') in ('TIMED', 'SCHEDULED', 'IN_PLAY', 'PAUSED')]
+    for idx in range(bracket.TOTAL):
+        if idx in info:
+            continue
+        if idx < 16:
+            t0, t1 = bracket.R32_PAIRS[idx]
+        else:
+            f0, f1 = bracket.feeders(idx)
+            t0 = info.get(f0, {}).get('w'); t1 = info.get(f1, {}).get('w')
+        if not t0 or not t1:
+            continue
+        s = {canon(t0), canon(t1)}
+        for m in sched:
+            if {canon(m['home']), canon(m['away'])} == s and m.get('utcDate'):
+                ups.append({'idx': idx, 'home': t0, 'away': t1, 'date': m['utcDate']})
+                break
+    return ups
+
 async def _do_sync(ctx):
+    """Returns (matches, newly_decided_info) or (None, {})."""
     if not (FD_TOKEN and results_api):
-        return None
+        return None, {}
     loop = asyncio.get_event_loop()
     matches = await loop.run_in_executor(None, results_api.fetch_sync, FD_TOKEN)
     built = results_api.build_actual(matches)
     sheets.set_facts({'standings': built.get('standings', {}), 'tables': built.get('tables', {}),
                       'results': built.get('results', [])})
-    info = _resolve_actual(matches)                       # {idx: {w, home, away, hs, as, date}}
+    info = _resolve_actual(matches)
+    old = sheets.get_winners()
+    new = {i: d for i, d in info.items() if not old.get(str(i))}
     won = {i: d['w'] for i, d in info.items() if d.get('w')}
     if won:
         sheets.set_winners_bulk(won)
         sheets.set_koinfo(info)
-    return matches
+    import json as _j
+    sheets._state_set('upcoming', _j.dumps(_upcoming_from(matches, info), ensure_ascii=False))
+    return matches, new
+
+async def _announce(ctx, new):
+    """Instant result cards to the group for newly decided matches."""
+    if not (GROUP_CHAT_ID and ANNOUNCE and new):
+        return
+    lines = ['⚡️ <b>Результат!</b>']
+    for idx in sorted(new):
+        lines.append(_result_line(idx, new[idx]))
+    try:
+        await ctx.bot.send_message(GROUP_CHAT_ID, '\n'.join(lines), parse_mode='HTML',
+                                   disable_web_page_preview=True)
+    except Exception:
+        logging.exception('announce failed')
 
 # ======================= scheduled jobs =======================
 async def sync_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        await _do_sync(ctx)
+        _, new = await _do_sync(ctx)
+        await _announce(ctx, new)
     except Exception:
-        pass
+        logging.exception('sync_job failed')
 
 async def post_job(ctx: ContextTypes.DEFAULT_TYPE):
     if not GROUP_CHAT_ID:
         return
-    today = dt.date.today().strftime('%d.%m')
-    msg = _digest_text(f'☀️ Сводка {today}\n\n')
+    today = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TZ_OFFSET)).strftime('%d.%m')
+    msg = _digest_text(f'🏟 <b>ЧМ-2026 · Сводка {today}</b>\n\n')
     await ctx.bot.send_message(GROUP_CHAT_ID, msg, parse_mode='HTML', disable_web_page_preview=True)
+    _store_ranks(_leaderboard())
 
 # ======================= admin =======================
 async def sync_cmd(update: Update, ctx):
@@ -359,19 +500,52 @@ async def sync_cmd(update: Update, ctx):
         await update.message.reply_text('⚠️ FOOTBALL_DATA_TOKEN не задан — авто-результаты выключены, используй /aw.'); return
     await update.message.reply_text('⏳ Тяну результаты…')
     try:
-        matches = await _do_sync(ctx)
+        matches, new = await _do_sync(ctx)
         won = sheets.get_winners()
-        await update.message.reply_text(f'✅ Готово. Матчей в API: {len(matches)}. Решено матчей сетки: {len(won)}/31.')
+        note = f'\n⚡ Новых результатов: {len(new)}' if new else ''
+        await update.message.reply_text(
+            f'✅ Готово. Матчей в API: {len(matches)}. Решено матчей сетки: {len(won)}/31.{note}')
+        await _announce(ctx, new)
     except Exception as e:
         await update.message.reply_text(f'⚠️ Ошибка: {type(e).__name__}: {str(e)[:200]}')
+
+async def diag_cmd(update: Update, ctx):
+    """Admin one-tap health check: what the API returns vs what resolved."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not (FD_TOKEN and results_api):
+        await update.message.reply_text('FOOTBALL_DATA_TOKEN не задан.'); return
+    try:
+        loop = asyncio.get_event_loop()
+        matches = await loop.run_in_executor(None, results_api.fetch_sync, FD_TOKEN)
+    except Exception as e:
+        await update.message.reply_text(f'API error: {type(e).__name__}: {str(e)[:150]}'); return
+    ko = [m for m in matches if m.get('stage') and m['stage'] != 'GROUP_STAGE']
+    fin = [m for m in ko if m.get('status') == 'FINISHED']
+    info = _resolve_actual(matches)
+    unmatched = []
+    for m in fin:
+        pair = {canon(m['home']), canon(m['away'])}
+        hit = any({canon(d['home']), canon(d['away'])} == pair for d in info.values())
+        if not hit:
+            unmatched.append(f"{m['stage']}: {m['home']}–{m['away']} {m['hs']}-{m['as']} ({m.get('duration')})")
+    stages = sorted({m.get('stage') for m in ko if m.get('stage')})
+    txt = (f'🔧 Диагностика\nВсего матчей API: {len(matches)} · KO: {len(ko)} · KO FINISHED: {len(fin)}\n'
+           f'Стадии KO в API: {", ".join(stages) or "—"}\n'
+           f'Замаплено на сетку: {len(info)}/31\n'
+           f'Победителей в таблице: {len(sheets.get_winners())}/31')
+    if unmatched:
+        txt += '\n⚠️ FINISHED, но не замаплены:\n' + '\n'.join(unmatched[:6])
+    await update.message.reply_text(txt)
 
 async def post_cmd(update: Update, ctx):
     if not is_admin(update.effective_user.id):
         return
     target = GROUP_CHAT_ID or update.effective_chat.id
-    today = dt.date.today().strftime('%d.%m')
-    msg = _digest_text(f'☀️ Сводка {today}\n\n')
+    today = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=TZ_OFFSET)).strftime('%d.%m')
+    msg = _digest_text(f'🏟 <b>ЧМ-2026 · Сводка {today}</b>\n\n')
     await ctx.bot.send_message(target, msg, parse_mode='HTML', disable_web_page_preview=True)
+    _store_ranks(_leaderboard())
     if GROUP_CHAT_ID:
         await update.message.reply_text('✅ Отправил в группу.')
 
@@ -381,6 +555,10 @@ async def aw_cmd(update: Update, ctx):   # /aw <match 1-31> <team>
     try:
         m = int(ctx.args[0]); team = ' '.join(ctx.args[1:]); assert 1 <= m <= bracket.TOTAL and team
         idx = m - 1
+        cands = [t for pair in bracket.R32_PAIRS for t in pair]
+        for t in cands:
+            if canon(t) == canon(team):
+                team = t; break
         sheets.set_winner(idx, team)
         home, away = bracket.R32_PAIRS[idx] if idx < 16 else (None, None)
         sheets.set_koinfo({idx: {'w': team, 'home': home, 'away': away, 'hs': None, 'as': None,
@@ -411,6 +589,17 @@ async def deadline_cmd(update: Update, ctx):
     d = sheets.get_deadline()
     await update.message.reply_text(f'⏰ Дедлайн (по Алматы): {d}' if d else 'Дедлайн не задан.')
 
+async def facts_cmd(update: Update, ctx):
+    facts = sheets.get_facts(); tb = facts.get('tables') or {}
+    if not tb:
+        await update.message.reply_text('Фактов пока нет — будут после /sync.'); return
+    lines = ['📋 <b>Группы — места и очки</b>']
+    for g in 'ABCDEFGHIJKL':
+        rows = tb.get(g, [])
+        if rows:
+            lines.append(f"<b>{g}</b>: " + ' · '.join(f"{i+1}.{r['team']} {r['pts']}" for i, r in enumerate(rows)))
+    await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+
 async def id_cmd(update: Update, ctx):
     uid = update.effective_user.id
     await update.message.reply_text(f'Твой id: {uid}\n' + ('✅ ты админ' if is_admin(uid) else '❗ впиши это число в ADMIN_IDS'))
@@ -426,18 +615,18 @@ def main():
     for cmd, fn in [('start', start), ('restart', restart), ('mybracket', mybracket),
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd), ('sync', sync_cmd),
                     ('post', post_cmd), ('aw', aw_cmd), ('reset', reset_cmd), ('setdeadline', setdeadline_cmd),
-                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd)]:
+                    ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('diag', diag_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_callback))
 
     async def on_error(update, ctx):
-        import logging; logging.error('Update error: %s', ctx.error)
+        logging.error('Update error: %s', ctx.error)
     app.add_error_handler(on_error)
 
     if app.job_queue:
-        app.job_queue.run_daily(sync_job, time=dt.time(hour=(SYNC_HOUR - TZ_OFFSET) % 24, minute=0))
+        app.job_queue.run_repeating(sync_job, interval=SYNC_EVERY_H * 3600, first=30)
         app.job_queue.run_daily(post_job, time=dt.time(hour=(POST_HOUR - TZ_OFFSET) % 24, minute=0))
-        print(f'Scheduled: sync {SYNC_HOUR}:00 / post {POST_HOUR}:00 Almaty.')
+        print(f'Scheduled: sync every {SYNC_EVERY_H}h (+30s after start) / post {POST_HOUR}:00 Almaty.')
     else:
         print('WARNING: job_queue is None. Add python-telegram-bot[job-queue] to requirements.')
     print('Bot running…')
