@@ -300,15 +300,27 @@ async def sp_post_job(ctx: ContextTypes.DEFAULT_TYPE):
         logging.exception('sp_post_job failed')
 
 async def spost_cmd(update: Update, ctx):
-    """Admin: /spost — open cards in the group; /spost test — private preview."""
+    """Admin: /spost — open cards in the group; /spost test — private preview of real
+    upcoming cards; /spost demo — fake demo card right now (buttons work, nothing saved)."""
     if not is_admin(update.effective_user.id):
         return
-    test = bool(ctx.args) and ctx.args[0].lower() == 'test'
+    arg = (ctx.args[0].lower() if ctx.args else '')
+    if arg == 'demo':
+        h, a = 'Paraguay', 'France'
+        date = (_utcnow() + dt.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        txt = ('🧪 <b>ДЕМО</b> — так карточка будет выглядеть в группе с 1/8 финала.\n'
+               'Кнопки живые, но голос не считается.\n\n' + _sp_card_text(16, h, a, date))
+        await ctx.bot.send_message(update.effective_chat.id, txt, parse_mode='HTML',
+                                   reply_markup=_sp_keyboard(16, h, a, test=True))
+        return
+    test = arg == 'test'
     target = update.effective_chat.id if test else (GROUP_CHAT_ID or update.effective_chat.id)
     n = await _post_sp_cards(ctx, target, horizon_h=30, test=test)
     tail = ' (тест — только тебе)' if test else ''
-    await update.message.reply_text(f'✅ Карточек: {n}{tail}' if n
-                                    else 'Нет подходящих матчей в ближайшие 30ч (или карточки уже открыты).')
+    await update.message.reply_text(
+        f'✅ Карточек: {n}{tail}' if n else
+        'Пока нет матчей 1/8+ в ближайшие 30ч — карточки откроются сами в 11:00 в день матча.\n'
+        'Посмотреть, как это выглядит: /spost demo')
 
 async def _on_sp_tap(update: Update, ctx):
     q = update.callback_query
