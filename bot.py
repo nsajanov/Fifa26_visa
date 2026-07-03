@@ -26,6 +26,9 @@ SYNC_HOUR = int(os.getenv('SYNC_HOUR', '10'))          # kept for compatibility
 POST_HOUR = int(os.getenv('POST_HOUR', '11'))
 TZ_OFFSET = int(os.getenv('TZ_OFFSET', '5'))            # Almaty UTC+5
 SYNC_EVERY_H = int(os.getenv('SYNC_EVERY_H', '2'))      # NEW: sync cadence, hours
+# Fair late (re)submissions: entries updated AFTER this moment (UTC 'YYYY-MM-DD HH:MM')
+# earn points only for matches that kicked off AFTER their submission time.
+LATE_CUTOFF = os.getenv('LATE_CUTOFF', '')
 WINDOW_HOURS = int(os.getenv('DIGEST_HOURS', '20'))
 ANNOUNCE = os.getenv('ANNOUNCE_RESULTS', '1') != '0'    # instant result cards to the group
 
@@ -380,24 +383,62 @@ def _sp_award_lines(idx, d):
     return out
 
 # ======================= scoring / leaderboard =======================
-def _score(picks, actual):
+def _score(picks, actual, cutoff=None, koinfo=None):
+    """cutoff (datetime): count a position only if its match kicked off after cutoff —
+    fair scoring for players who (re)submitted late."""
     total = 0.0; correct = 0
     for k, team in picks.items():
         i = int(k)
         w = actual.get(str(i))
-        if w and canon(w) == canon(team):
-            total += bracket.ROUND_POINTS[bracket.round_of(i)]; correct += 1
+        if not w or canon(w) != canon(team):
+            continue
+        if cutoff is not None:
+            ds = ((koinfo or {}).get(str(i)) or {}).get('date')
+            if ds:
+                try:
+                    if dt.datetime.strptime(ds, '%Y-%m-%dT%H:%M:%SZ') < cutoff:
+                        continue        # match started before they submitted — no points
+                except Exception:
+                    pass
+        total += bracket.ROUND_POINTS[bracket.round_of(i)]; correct += 1
     return total, correct
+
+def _submit_times():
+    """{name: 'YYYY-MM-DD HH:MM'} from the players tab (updated_at, UTC)."""
+    out = {}
+    try:
+        rows = sheets._player_rows()
+        if rows:
+            for r in rows:
+                if r and len(r) >= 4 and r[1] and r[3]:
+                    out[r[1]] = r[3]
+    except Exception:
+        pass
+    return out
+
+def _late_cutoff_for(name, times):
+    """Returns the player's own submission datetime if it is later than LATE_CUTOFF."""
+    if not LATE_CUTOFF:
+        return None
+    try:
+        gate = dt.datetime.strptime(LATE_CUTOFF, '%Y-%m-%d %H:%M')
+        sub_t = dt.datetime.strptime(times.get(name, ''), '%Y-%m-%d %H:%M')
+        return sub_t if sub_t > gate else None
+    except Exception:
+        return None
 
 def _leaderboard():
     """Rows: (name, total, correct, bracket_pts, score_game_pts)."""
     actual = sheets.get_winners()
     subs = sheets.all_submissions()
     spt = _sp_totals()
+    koinfo = sheets.get_koinfo() if LATE_CUTOFF else None
+    times = _submit_times() if LATE_CUTOFF else {}
     rows = []
     seen = set()
     for name, sub in subs.items():
-        br, c = _score(sub.get('picks', {}), actual)
+        br, c = _score(sub.get('picks', {}), actual,
+                       cutoff=_late_cutoff_for(name, times), koinfo=koinfo)
         sg = spt.get(name, 0.0)
         rows.append((name, br + sg, c, br, sg)); seen.add(name)
     for name, sg in spt.items():            # score-game players without a bracket
