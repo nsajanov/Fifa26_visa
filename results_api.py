@@ -16,7 +16,8 @@ ALIAS = {'Korea Republic': 'South Korea', 'Türkiye': 'Turkiye', 'Turkey': 'Turk
          "Côte d'Ivoire": "Cote d'Ivoire", 'Ivory Coast': "Cote d'Ivoire",
          'Cote d Ivoire': "Cote d'Ivoire", 'Curaçao': 'Curacao',
          'Bosnia-Herzegovina': 'Bosnia and Herzegovina',
-         'Cape Verde': 'Cabo Verde', 'Iran': 'IR Iran'}
+         'Cape Verde': 'Cabo Verde', 'Cape Verde Islands': 'Cabo Verde',
+         'Iran': 'IR Iran', 'United States of America': 'United States'}
 
 def norm(name):
     return ALIAS.get(name, name)

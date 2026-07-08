@@ -76,10 +76,29 @@ def canon(s):
     s = (s.replace('ô', 'o').replace('é', 'e').replace('ç', 'c').replace('ü', 'u')
           .replace('ö', 'o').replace('ã', 'a').replace('í', 'i').replace('’', ''))
     s = re.sub(r'[^a-z]', '', s)
-    s = s.replace('congodr', 'drcongo').replace('capeverde', 'caboverde')
-    s = s.replace('ivorycoast', 'cotedivoire').replace('turkey', 'turkiye')
-    s = s.replace('czechrepublic', 'czechia').replace('korearepublic', 'southkorea')
+    s = s.replace('congodr', 'drcongo').replace('capeverdeislands', 'caboverde')
+    s = s.replace('capeverde', 'caboverde').replace('ivorycoast', 'cotedivoire')
+    s = s.replace('turkey', 'turkiye').replace('czechrepublic', 'czechia')
+    s = s.replace('korearepublic', 'southkorea').replace('unitedstatesofamerica', 'unitedstates')
+    s = s.replace('iriran', 'iran')
     return s
+
+def same_team(x, y):
+    """Tolerant equality: exact canon match, or one canon name is a prefix/superset
+    of the other (>=5 chars) — survives API spelling variants we haven't seen yet."""
+    cx, cy = canon(x), canon(y)
+    if not cx or not cy:
+        return False
+    if cx == cy:
+        return True
+    if len(cx) >= 5 and len(cy) >= 5 and (cx.startswith(cy) or cy.startswith(cx)
+                                          or cx in cy or cy in cx):
+        return True
+    return False
+
+def pair_matches(m, t0, t1):
+    return ((same_team(m['home'], t0) and same_team(m['away'], t1)) or
+            (same_team(m['home'], t1) and same_team(m['away'], t0)))
 
 # ======================= prediction flow (buttons) =======================
 async def start(update: Update, ctx):
@@ -416,16 +435,25 @@ def _submit_times():
         pass
     return out
 
+def _parse_dt(s):
+    """Accepts 'YYYY-MM-DD HH:MM' or bare 'YYYY-MM-DD'."""
+    s = (s or '').strip()
+    for fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            return dt.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
 def _late_cutoff_for(name, times):
     """Returns the player's own submission datetime if it is later than LATE_CUTOFF."""
     if not LATE_CUTOFF:
         return None
-    try:
-        gate = dt.datetime.strptime(LATE_CUTOFF, '%Y-%m-%d %H:%M')
-        sub_t = dt.datetime.strptime(times.get(name, ''), '%Y-%m-%d %H:%M')
-        return sub_t if sub_t > gate else None
-    except Exception:
+    gate = _parse_dt(LATE_CUTOFF)
+    sub_t = _parse_dt(times.get(name, ''))
+    if gate is None or sub_t is None:
         return None
+    return sub_t if sub_t > gate else None
 
 def _leaderboard():
     """Rows: (name, total, correct, bracket_pts, score_game_pts)."""
@@ -657,9 +685,8 @@ def _resolve_actual(matches):
     fin = [m for m in matches if m.get('status') == 'FINISHED' or
            (m.get('status') is None and m.get('hs') is not None and m.get('as') is not None)]
     def find(t0, t1):
-        s = {canon(t0), canon(t1)}
         for m in fin:
-            if {canon(m['home']), canon(m['away'])} == s:
+            if pair_matches(m, t0, t1):
                 return m
         return None
     def decided_winner(m):
@@ -685,8 +712,8 @@ def _resolve_actual(matches):
         w = decided_winner(m)
         if not w:
             continue
-        home_is_t0 = canon(m['home']) == canon(t0)
-        info[idx] = {'w': t0 if canon(w) == canon(t0) else t1,
+        home_is_t0 = same_team(m['home'], t0)
+        info[idx] = {'w': t0 if same_team(w, t0) else t1,
                      'home': t0 if home_is_t0 else t1,
                      'away': t1 if home_is_t0 else t0,
                      'hs': m['hs'] if home_is_t0 else m['as'],
@@ -710,9 +737,8 @@ def _upcoming_from(matches, info):
             t0 = info.get(f0, {}).get('w'); t1 = info.get(f1, {}).get('w')
         if not t0 or not t1:
             continue
-        s = {canon(t0), canon(t1)}
         for m in sched:
-            if {canon(m['home']), canon(m['away'])} == s and m.get('utcDate'):
+            if pair_matches(m, t0, t1) and m.get('utcDate'):
                 ups.append({'idx': idx, 'home': t0, 'away': t1, 'date': m['utcDate']})
                 break
     return ups
@@ -801,8 +827,7 @@ async def diag_cmd(update: Update, ctx):
     info = _resolve_actual(matches)
     unmatched = []
     for m in fin:
-        pair = {canon(m['home']), canon(m['away'])}
-        hit = any({canon(d['home']), canon(d['away'])} == pair for d in info.values())
+        hit = any(pair_matches(m, d['home'], d['away']) for d in info.values())
         if not hit:
             unmatched.append(f"{m['stage']}: {m['home']}–{m['away']} {m['hs']}-{m['as']} ({m.get('duration')})")
     stages = sorted({m.get('stage') for m in ko if m.get('stage')})
