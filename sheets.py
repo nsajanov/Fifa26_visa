@@ -132,6 +132,36 @@ def all_submissions():
         out[p['name']] = p['submission']
     return out
 
+def player_rows_all():
+    """[[user_id, name, submission_json, updated_at], ...] — works in both storage modes."""
+    if _use_sheets():
+        return _player_rows() or []
+    db = _load_local()
+    return [[uid, p.get('name', ''), json.dumps(p.get('submission', {}), ensure_ascii=False),
+             p.get('updated_at', '')] for uid, p in db['players'].items()]
+
+def rebind_user_id(name, new_uid):
+    """Attach a real telegram uid to a row that was imported manually (placeholder id).
+    Matches by column B (name), case-insensitive. Returns the matched name or None."""
+    target = (name or '').strip().lower()
+    if _use_sheets():
+        _connect()
+        rows = _ws_players.get_all_values()
+        for i, row in enumerate(rows[1:], start=2):
+            if len(row) >= 2 and row[1].strip().lower() == target:
+                _ws_players.update_cell(i, 1, str(new_uid))
+                _cache_bust('rows', 'subs')
+                return row[1]
+        return None
+    db = _load_local()
+    for uid, p in list(db['players'].items()):
+        if p.get('name', '').strip().lower() == target:
+            db['players'][str(new_uid)] = db['players'].pop(uid)
+            _save_local(db)
+            _cache_bust('rows', 'subs')
+            return p['name']
+    return None
+
 def _state_all():
     """All state rows as {key: value}, cached (1 read per TTL window)."""
     if _use_sheets():
