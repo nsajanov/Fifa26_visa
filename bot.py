@@ -1181,11 +1181,80 @@ async def fc_cmd(update: Update, ctx):
         '(номер матча — в «Кто с кем играет»)</i>',
         parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
+def _fc_compact_table(st, uid, name):
+    """<=195 chars, plain text — fits a Telegram popup alert."""
+    rows = fc26.standings(st)
+    if not rows:
+        return 'Пока пусто — жми «Я участвую»!'
+    me = next((i for i, t in enumerate(rows, 1)
+               if t['n'] == name or any(p.get('uid') == uid and p['n'] == t['n'] for p in st['players'])), None)
+    top = ' | '.join(f"{i}.{t['n'].split()[0]} {t['pts']}" for i, t in enumerate(rows[:5], 1))
+    tail = f'\nТы: {me}-е место' if me else ''
+    return (f'🏆 {top}{tail}')[:195]
+
+def _fc_compact_round(st, uid, name):
+    label, block = fc26.current_block(st)
+    if not block:
+        return 'Турнир ещё не начат.'
+    mine = None
+    for i, (a, b) in enumerate(block['pairs'], 1):
+        if name in (a, b) or any(p.get('uid') == uid and p['n'] in (a, b) for p in st['players']):
+            res = block['res'].get(str(i - 1))
+            mine = f'Твой матч №{i}: {a} — {b}' + (f' ({res[0]}:{res[1]})' if res else f'. Счёт: /fc {i} X:Y')
+            break
+    todo = sum(1 for i in range(len(block['pairs'])) if not block['res'].get(str(i)))
+    base = f'{label}: осталось матчей {todo}. '
+    return (base + (mine or 'Ты в этом туре не играешь (или не участвуешь).'))[:195]
+
+def _my_wc_stats(uid, tg_name):
+    rows = _leaderboard()
+    myname = None
+    for r in sheets.player_rows_all():
+        if r and r[0] == str(uid) and len(r) >= 2:
+            myname = r[1]; break
+    myname = myname or tg_name
+    for i, r in enumerate(rows, 1):
+        if r[0] == myname:
+            extra = f' (сетка {r[3]:g} + счёт {r[4]:g})' if len(r) >= 5 and r[4] else ''
+            return f'⚽ {myname}: {i}-е место, {r[1]:g} очков{extra} из {len(rows)} участников'[:195]
+    return 'Тебя нет в таблице ЧМ — прогноз не найден.'
+
+async def fcmenu_cmd(update: Update, ctx):
+    """Admin: опубликовать интерактивное меню в группу (кнопки работают у всех,
+    даже если писать в группе нельзя). Ответы приходят личными попапами."""
+    if not is_admin(update.effective_user.id):
+        return
+    st = _fc_state()
+    kb = [[InlineKeyboardButton('🎮 Я участвую в FC26!', callback_data='fc:join')],
+          [InlineKeyboardButton('📋 Мой матч', callback_data='fc:round'),
+           InlineKeyboardButton('🏆 Таблица FC26', callback_data='fc:table')],
+          [InlineKeyboardButton('⚽ Мои очки ЧМ-2026', callback_data='fc:me')]]
+    target = GROUP_CHAT_ID or update.effective_chat.id
+    await ctx.bot.send_message(
+        target,
+        '🎮 <b>FC26 · офисный кубок на PS5</b>\n'
+        f'Участников: <b>{len(st["players"])}</b> · швейцарка (3 тура) → полуфиналы → финал\n'
+        '⏰ Слоты: 13:00–14:00 и 18:00–19:00 · финал — чт в обед\n\n'
+        '👇 Жми кнопки — ответ придёт только тебе, чат не засоряем.',
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    if GROUP_CHAT_ID and str(update.effective_chat.id) != str(GROUP_CHAT_ID):
+        await update.message.reply_text('✅ Меню отправлено в группу. Советую закрепить его (Pin).')
+
 async def _on_fc_tap(update: Update, ctx):
     q = update.callback_query
     action = q.data.split(':', 1)[1]
     st = _fc_state()
     uid = q.from_user.id
+    in_group = q.message.chat.type in ('group', 'supergroup')
+    if action == 'me':
+        await q.answer(_my_wc_stats(uid, q.from_user.full_name), show_alert=True)
+        return
+    if action == 'round' and in_group:
+        await q.answer(_fc_compact_round(st, uid, q.from_user.full_name), show_alert=True)
+        return
+    if action == 'table' and in_group:
+        await q.answer(_fc_compact_table(st, uid, q.from_user.full_name), show_alert=True)
+        return
     if action == 'join':
         name = q.from_user.full_name
         if st['stage'] != 'reg':
@@ -1290,7 +1359,7 @@ def main():
                     ('post', post_cmd), ('aw', aw_cmd), ('reset', reset_cmd), ('setdeadline', setdeadline_cmd),
                     ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('diag', diag_cmd),
                     ('spost', spost_cmd), ('iam', iam_cmd), ('link', link_cmd), ('fc', fc_cmd),
-                    ('dupes', dupes_cmd)]:
+                    ('dupes', dupes_cmd), ('fcmenu', fcmenu_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_callback))
 
