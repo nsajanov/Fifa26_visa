@@ -1007,6 +1007,45 @@ async def iam_cmd(update: Update, ctx):
         _set_json_state('sp', sp)
     await update.message.reply_text(f'✅ Готово! Теперь ты — «{matched}»: сетка и «Угадай счёт» считаются вместе.')
 
+async def dupes_cmd(update: Update, ctx):
+    """Admin: показать непривязанные аккаунты счёт-игры + готовые /link команды."""
+    if not is_admin(update.effective_user.id):
+        return
+    rows = sheets.player_rows_all()
+    uid2name = {r[0]: r[1] for r in rows if r and len(r) >= 2}
+    names = [r[1] for r in rows if r and len(r) >= 2 and r[1]]
+    sp = _sp_all()
+    idents = {}
+    for preds in sp.values():
+        for uid, p in preds.items():
+            idents[uid] = p.get('n', '')
+    unlinked = {u: n for u, n in idents.items() if u not in uid2name}
+    placeholders = [n for u, n in uid2name.items() if u.startswith('9000')]
+    if not unlinked:
+        txt = '✅ Непривязанных аккаунтов нет — дублей быть не должно.'
+        if placeholders:
+            txt += '\nЕщё без Telegram (норм, если они не тапают): ' + ', '.join(placeholders)
+        await update.message.reply_text(txt)
+        return
+    lines = ['🔎 <b>Непривязанные аккаунты счёт-игры</b>',
+             '<i>Скопируй нужную команду (поправь имя, если угадал не так):</i>', '']
+    used = set()
+    for uid, nm in unlinked.items():
+        guess = _match_name(nm, names)
+        if guess:
+            used.add(guess)
+    for uid, nm in unlinked.items():
+        guess = _match_name(nm, names)
+        free = [p for p in placeholders if p not in used]
+        hint = guess or (free[0] if free else 'Имя_из_таблицы')
+        if guess:
+            lines.append(f'«{nm}» (id {uid}) ✅ похоже на <b>{guess}</b>')
+        else:
+            lines.append(f'«{nm}» (id {uid}) ❓ не распознал; свободны: {", ".join(free) or "—"}')
+        lines.append(f'<code>/link {uid} {hint}</code>')
+        lines.append('')
+    await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+
 async def link_cmd(update: Update, ctx):
     """Admin: /link <uid> <имя> — привязать чужой Telegram id к строке таблицы."""
     if not is_admin(update.effective_user.id):
@@ -1037,6 +1076,17 @@ def _fc_save(st):
 def _fc_is_player(st, uid, name):
     return any(p.get('uid') == uid or p['n'].lower() == (name or '').lower() for p in st['players'])
 
+async def _fc_out(ctx, update, text):
+    """FC announcements go to the GROUP; if the command came from a private chat —
+    confirm there too."""
+    target = GROUP_CHAT_ID or update.effective_chat.id
+    await ctx.bot.send_message(target, text, parse_mode='HTML')
+    if GROUP_CHAT_ID and str(update.effective_chat.id) != str(GROUP_CHAT_ID):
+        try:
+            await update.message.reply_text('✅ Отправил в группу.')
+        except Exception:
+            pass
+
 async def fc_cmd(update: Update, ctx):
     """/fc — офисный турнир FC26. Подкоманды:
     join · add <имя> (админ) · start (админ) · <N> <X:Y> [победитель по пен.] ·
@@ -1053,7 +1103,7 @@ async def fc_cmd(update: Update, ctx):
         if _fc_is_player(st, uid, name):
             await update.message.reply_text('Ты уже в списке.'); return
         st['players'].append({'n': name, 'uid': uid}); _fc_save(st)
-        await update.message.reply_text(f'🎮 {name} в игре! Участников: {len(st["players"])}')
+        await _fc_out(ctx, update, f'🎮 <b>{name}</b> в деле! Участников: <b>{len(st["players"])}</b>')
         return
 
     if sub == 'add':
@@ -1071,7 +1121,7 @@ async def fc_cmd(update: Update, ctx):
             await update.message.reply_text('Нужно минимум 4 участника.'); return
         st['stage'] = 'swiss'
         st['rounds'] = [fc26.pair_round(st)]; _fc_save(st)
-        await update.message.reply_text(fc26.fmt_round(st), parse_mode='HTML')
+        await _fc_out(ctx, update, '🏁 <b>Турнир FC26 стартовал!</b>\n\n' + fc26.fmt_round(st))
         return
 
     if sub == 'round':
@@ -1082,31 +1132,9 @@ async def fc_cmd(update: Update, ctx):
 
     if sub == 'next':
         if not is_admin(uid): return
-        if st['stage'] == 'swiss':
-            if not fc26.round_done(st['rounds'][-1]):
-                await update.message.reply_text('Ещё не все счета тура внесены (/fc round).'); return
-            if len(st['rounds']) >= fc26.SWISS_ROUNDS:
-                top = fc26.start_semis(st); _fc_save(st)
-                await update.message.reply_text(
-                    '🏁 Швейцарка окончена! Топ-4: ' + ', '.join(top) +
-                    '\n\n' + fc26.fmt_round(st), parse_mode='HTML')
-            else:
-                st['rounds'].append(fc26.pair_round(st)); _fc_save(st)
-                await update.message.reply_text(fc26.fmt_round(st), parse_mode='HTML')
-        elif st['stage'] == 'semis':
-            if not fc26.semis_done(st):
-                await update.message.reply_text('Полуфиналы ещё не доиграны.'); return
-            fc26.start_final(st); _fc_save(st)
-            await update.message.reply_text(fc26.fmt_round(st), parse_mode='HTML')
-        elif st['stage'] == 'final':
-            if not fc26.final_done(st):
-                await update.message.reply_text('Финал ещё не сыгран.'); return
-            st['stage'] = 'done'; _fc_save(st)
-            await update.message.reply_text(
-                f'🏆 <b>ЧЕМПИОН FC26: {fc26.champion(st)}</b>\n🥉 Бронза: {fc26.bronze_winner(st)}\n\n'
-                + fc26.fmt_table(st), parse_mode='HTML')
-        else:
-            await update.message.reply_text('Турнир не активен. /fc start — начать.')
+        await _fc_next(ctx, GROUP_CHAT_ID or update.effective_chat.id, st)
+        if GROUP_CHAT_ID and str(update.effective_chat.id) != str(GROUP_CHAT_ID):
+            await update.message.reply_text('✅ Отправил в группу.')
         return
 
     if sub.isdigit():          # /fc <N> <X:Y> [имя победителя по пенальти]
@@ -1123,7 +1151,6 @@ async def fc_cmd(update: Update, ctx):
         if ok:
             _fc_save(st)
             out = f'✅ {msg}'
-            label, block = fc26.current_block(st)
             if st['stage'] == 'swiss' and fc26.round_done(st['rounds'][-1]):
                 out += '\n\n🏁 Тур доигран! ' + ('Следующий: /fc next' if len(st['rounds']) < fc26.SWISS_ROUNDS
                                                  else 'Дальше плей-офф: /fc next')
@@ -1132,7 +1159,7 @@ async def fc_cmd(update: Update, ctx):
                 out += '\n\n🏁 Полуфиналы сыграны! Финал: /fc next'
             elif st['stage'] == 'final' and fc26.final_done(st):
                 out += '\n\n🏆 Финал сыгран! Итоги: /fc next'
-            await update.message.reply_text(out, parse_mode='HTML')
+            await _fc_out(ctx, update, out)
         else:
             await update.message.reply_text('⚠️ ' + msg)
         return
@@ -1168,7 +1195,8 @@ async def _on_fc_tap(update: Update, ctx):
         st['players'].append({'n': name, 'uid': uid}); _fc_save(st)
         await q.answer(f'🎮 Ты в игре, {name}!')
         try:
-            await q.message.reply_text(f'🎮 <b>{name}</b> в деле! Участников: <b>{len(st["players"])}</b>\n'
+            await ctx.bot.send_message(GROUP_CHAT_ID or q.message.chat_id,
+                                       f'🎮 <b>{name}</b> в деле! Участников: <b>{len(st["players"])}</b>\n'
                                        + ' · '.join(p['n'] for p in st['players']), parse_mode='HTML')
         except Exception:
             pass
@@ -1185,15 +1213,17 @@ async def _on_fc_tap(update: Update, ctx):
         if not is_admin(uid):
             await q.answer('Только для админа.', show_alert=True); return
         await q.answer()
+        target = GROUP_CHAT_ID or q.message.chat_id
         if action == 'start':
             if len(st['players']) < 4:
                 await ctx.bot.send_message(q.message.chat_id, 'Нужно минимум 4 участника.'); return
             if st['stage'] != 'reg':
                 await ctx.bot.send_message(q.message.chat_id, 'Турнир уже запущен.'); return
             st['stage'] = 'swiss'; st['rounds'] = [fc26.pair_round(st)]; _fc_save(st)
-            await ctx.bot.send_message(q.message.chat_id, fc26.fmt_round(st), parse_mode='HTML')
+            await ctx.bot.send_message(target, '🏁 <b>Турнир FC26 стартовал!</b>\n\n' + fc26.fmt_round(st),
+                                       parse_mode='HTML')
         else:
-            await _fc_next(ctx, q.message.chat_id, st)
+            await _fc_next(ctx, target, st)
 
 async def _fc_next(ctx, chat_id, st):
     if st['stage'] == 'swiss':
@@ -1259,7 +1289,8 @@ def main():
                     ('leaderboard', leaderboard_cmd), ('facts', facts_cmd), ('sync', sync_cmd),
                     ('post', post_cmd), ('aw', aw_cmd), ('reset', reset_cmd), ('setdeadline', setdeadline_cmd),
                     ('deadline', deadline_cmd), ('id', id_cmd), ('chatid', chatid_cmd), ('diag', diag_cmd),
-                    ('spost', spost_cmd), ('iam', iam_cmd), ('link', link_cmd), ('fc', fc_cmd)]:
+                    ('spost', spost_cmd), ('iam', iam_cmd), ('link', link_cmd), ('fc', fc_cmd),
+                    ('dupes', dupes_cmd)]:
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(CallbackQueryHandler(on_callback))
 
