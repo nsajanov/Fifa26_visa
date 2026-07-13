@@ -90,6 +90,25 @@ def pair_round(st):
 def round_done(rnd):
     return all(str(i) in rnd['res'] for i in range(len(rnd['pairs'])))
 
+def build_full_schedule(st):
+    """Generate ALL Swiss rounds upfront so matches can be played in any order.
+    Keeps already existing rounds (and their results) untouched."""
+    while len(st['rounds']) < SWISS_ROUNDS:
+        st['rounds'].append(pair_round(st))
+
+def swiss_flat(st):
+    """Global match list across all Swiss rounds:
+    [(no, round_idx, pair_idx, a, b, res|None), ...] — no is 1-based."""
+    out, n = [], 0
+    for r, rnd in enumerate(st['rounds']):
+        for i, (a, b) in enumerate(rnd['pairs']):
+            n += 1
+            out.append((n, r, i, a, b, rnd['res'].get(str(i))))
+    return out
+
+def swiss_done(st):
+    return bool(st['rounds']) and all(round_done(r) for r in st['rounds'])
+
 # ---------- playoff ----------
 def start_semis(st):
     top = [t['n'] for t in standings(st)[:4]]
@@ -151,15 +170,25 @@ def current_block(st):
     return None, None
 
 def report(st, match_no, ga, gb, pen_winner=None):
-    """match_no is 1-based within the current block. Returns (ok, message)."""
+    """match_no: in Swiss — GLOBAL number across all rounds (play in any order!);
+    in playoff — number within the block. Returns (ok, message)."""
+    if st['stage'] == 'swiss':
+        flat = swiss_flat(st)
+        hit = next((m for m in flat if m[0] == match_no), None)
+        if not hit:
+            return False, f'Нет матча №{match_no}. Все матчи: /fc round'
+        no, r, i, a, b, _ = hit
+        st['rounds'][r]['res'][str(i)] = [ga, gb]
+        who = a if ga > gb else b if gb > ga else 'ничья'
+        return True, f'Тур {r + 1} · {a} {ga}:{gb} {b} → {who}'
     label, block = current_block(st)
     if not block:
-        return False, 'Сейчас нет активного тура.'
+        return False, 'Сейчас нет активного этапа.'
     i = match_no - 1
     if not (0 <= i < len(block['pairs'])):
         return False, f'Нет матча №{match_no} в блоке «{label}».'
     a, b = block['pairs'][i]
-    if st['stage'] in ('semis', 'final') and ga == gb and not pen_winner:
+    if ga == gb and not pen_winner:
         return False, 'В плей-офф ничьи нет: добавь победителя по пенальти, напр.  /fc 1 2:2 ' + a
     if pen_winner and pen_winner not in (a, b):
         return False, f'Победитель по пенальти должен быть {a} или {b}.'
@@ -176,6 +205,22 @@ def report(st, match_no, ga, gb, pen_winner=None):
 
 # ---------- formatting ----------
 def fmt_round(st):
+    if st['stage'] == 'swiss':
+        lines = ['🎮 <b>FC26 · Расписание</b> — играть можно в любом порядке!']
+        flat = swiss_flat(st)
+        cur_r = -1
+        for no, r, i, a, b, res in flat:
+            if r != cur_r:
+                cur_r = r
+                bye = st['rounds'][r].get('bye')
+                lines.append(f'\n<b>Тур {r + 1}</b>' + (f' · 😴 отдыхает {bye} (+3)' if bye else ''))
+            if res:
+                lines.append(f'✅ М{no}: {a} <b>{res[0]}:{res[1]}</b> {b}')
+            else:
+                lines.append(f'▫️ М{no}: {a} — {b}   <i>(/fc {no} X:Y)</i>')
+        left = sum(1 for m in flat if not m[5])
+        lines.append(f'\nОсталось матчей: <b>{left}</b>' if left else '\n🏁 Все матчи сыграны! Плей-офф: /fc next')
+        return '\n'.join(lines)
     label, block = current_block(st)
     if not block:
         return 'Турнир ещё не начат (или уже завершён).'
@@ -187,8 +232,6 @@ def fmt_round(st):
             lines.append(f'{tag}: {a} <b>{res[0]}:{res[1]}</b> {b}')
         else:
             lines.append(f'{tag}: {a} — {b}   <i>(счёт: /fc {i} X:Y)</i>')
-    if st['stage'] == 'swiss' and st['rounds'] and st['rounds'][-1].get('bye'):
-        lines.append(f"😴 Отдыхает: {st['rounds'][-1]['bye']} (+3 очка)")
     return '\n'.join(lines)
 
 def fmt_table(st):

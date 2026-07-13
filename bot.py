@@ -1156,8 +1156,10 @@ async def fc_cmd(update: Update, ctx):
         if len(st['players']) < 4:
             await update.message.reply_text('Нужно минимум 4 участника.'); return
         st['stage'] = 'swiss'
-        st['rounds'] = [fc26.pair_round(st)]; _fc_save(st)
-        await _fc_out(ctx, update, '🏁 <b>Турнир FC26 стартовал!</b>\n\n' + fc26.fmt_round(st))
+        st['rounds'] = []
+        fc26.build_full_schedule(st); _fc_save(st)
+        await _fc_out(ctx, update, '🏁 <b>Турнир FC26 стартовал!</b> Все туры открыты сразу — '
+                      'играйте в любом порядке.\n\n' + fc26.fmt_round(st))
         return
 
     if sub == 'round':
@@ -1229,18 +1231,27 @@ def _fc_compact_table(st, uid, name):
     return (f'🏆 {top}{tail}')[:195]
 
 def _fc_compact_round(st, uid, name):
+    myname = next((p['n'] for p in st['players'] if p.get('uid') == uid), name)
+    if st['stage'] == 'swiss' and st['rounds']:
+        flat = fc26.swiss_flat(st)
+        mine = [(no, a, b, res) for no, r, i, a, b, res in flat if myname in (a, b)]
+        todo = sum(1 for m in flat if not m[5])
+        nxt = next(((no, a, b) for no, a, b, res in mine if not res), None)
+        if nxt:
+            return (f'Всего осталось {todo}. Твой ближайший — М{nxt[0]}: {nxt[1]} vs {nxt[2]}. '
+                    f'Счёт: /fc {nxt[0]} X:Y')[:195]
+        if mine:
+            return f'Ты всё отыграл ✅ Осталось чужих матчей: {todo}'[:195]
+        return 'Ты не в турнире (или не привязан). Жми «Я участвую».'[:195]
     label, block = fc26.current_block(st)
     if not block:
         return 'Турнир ещё не начат.'
-    mine = None
     for i, (a, b) in enumerate(block['pairs'], 1):
-        if name in (a, b) or any(p.get('uid') == uid and p['n'] in (a, b) for p in st['players']):
+        if myname in (a, b):
             res = block['res'].get(str(i - 1))
-            mine = f'Твой матч №{i}: {a} — {b}' + (f' ({res[0]}:{res[1]})' if res else f'. Счёт: /fc {i} X:Y')
-            break
-    todo = sum(1 for i in range(len(block['pairs'])) if not block['res'].get(str(i)))
-    base = f'{label}: осталось матчей {todo}. '
-    return (base + (mine or 'Ты в этом туре не играешь (или не участвуешь).'))[:195]
+            return (f'{label} · твой матч №{i}: {a} — {b}' +
+                    (f' ({res[0]}:{res[1]})' if res else f'. Счёт: /fc {i} X:Y'))[:195]
+    return f'{label}: ты не играешь на этой стадии.'[:195]
 
 def _my_wc_stats(uid, tg_name):
     rows = _leaderboard()
@@ -1332,15 +1343,17 @@ async def _on_fc_tap(update: Update, ctx):
 
 async def _fc_next(ctx, chat_id, st):
     if st['stage'] == 'swiss':
-        if not fc26.round_done(st['rounds'][-1]):
-            await ctx.bot.send_message(chat_id, 'Ещё не все счета тура внесены.'); return
-        if len(st['rounds']) >= fc26.SWISS_ROUNDS:
-            top = fc26.start_semis(st); _fc_save(st)
-            await ctx.bot.send_message(chat_id, '🏁 Швейцарка окончена! Топ-4: ' + ', '.join(top) +
-                                       '\n\n' + fc26.fmt_round(st), parse_mode='HTML')
-        else:
-            st['rounds'].append(fc26.pair_round(st)); _fc_save(st)
-            await ctx.bot.send_message(chat_id, fc26.fmt_round(st), parse_mode='HTML')
+        if len(st['rounds']) < fc26.SWISS_ROUNDS:      # older start: open remaining rounds now
+            fc26.build_full_schedule(st); _fc_save(st)
+            await ctx.bot.send_message(chat_id, '📅 Открыл все туры — играйте в любом порядке!\n\n'
+                                       + fc26.fmt_round(st), parse_mode='HTML')
+            return
+        if not fc26.swiss_done(st):
+            await ctx.bot.send_message(chat_id, 'Ещё не все матчи сыграны (/fc round — что осталось).')
+            return
+        top = fc26.start_semis(st); _fc_save(st)
+        await ctx.bot.send_message(chat_id, '🏁 Швейцарка окончена! Топ-4: ' + ', '.join(top) +
+                                   '\n\n' + fc26.fmt_round(st), parse_mode='HTML')
     elif st['stage'] == 'semis':
         if not fc26.semis_done(st):
             await ctx.bot.send_message(chat_id, 'Полуфиналы ещё не доиграны.'); return
@@ -1363,16 +1376,22 @@ async def fc_remind_job(ctx: ContextTypes.DEFAULT_TYPE):
     st = _fc_state()
     if st['stage'] not in ('swiss', 'semis', 'final'):
         return
-    label, block = fc26.current_block(st)
-    if not block:
-        return
-    todo = [(i + 1, a, b) for i, (a, b) in enumerate(block['pairs'])
-            if not block['res'].get(str(i))]
+    if st['stage'] == 'swiss':
+        todo = [(no, a, b) for no, r, i, a, b, res in fc26.swiss_flat(st) if not res]
+        label = 'играть можно любой из списка'
+    else:
+        label, block = fc26.current_block(st)
+        if not block:
+            return
+        todo = [(i + 1, a, b) for i, (a, b) in enumerate(block['pairs'])
+                if not block['res'].get(str(i))]
     if not todo:
         return
     lines = [f'⏰ <b>FC26 · через 15 минут слот!</b> ({label})']
-    for n, a, b in todo:
-        lines.append(f'🎮 {a} 🆚 {b}   <i>(счёт: /fc {n} X:Y)</i>')
+    for n, a, b in todo[:10]:
+        lines.append(f'🎮 М{n}: {a} 🆚 {b}   <i>(счёт: /fc {n} X:Y)</i>')
+    if len(todo) > 10:
+        lines.append(f'<i>…и ещё {len(todo) - 10} — полный список: /fc round</i>')
     try:
         await ctx.bot.send_message(GROUP_CHAT_ID, '\n'.join(lines), parse_mode='HTML')
     except Exception:
