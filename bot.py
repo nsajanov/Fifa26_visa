@@ -1115,6 +1115,42 @@ async def fc_cmd(update: Update, ctx):
         await update.message.reply_text(f'✅ Добавлен: {name}. Участников: {len(st["players"])}')
         return
 
+    if sub == 'remove':
+        if not is_admin(uid): return
+        name = ' '.join(args[1:]).strip()
+        if not name:
+            await update.message.reply_text('Формат: /fc remove Имя\nСписок: ' +
+                                            (', '.join(p['n'] for p in st['players']) or 'пусто'))
+            return
+        hit = next((p for p in st['players'] if p['n'].lower() == name.lower()), None)
+        if not hit:
+            hit = next((p for p in st['players'] if ncanon(name) and ncanon(name) in ncanon(p['n'])), None)
+        if not hit:
+            await update.message.reply_text(f'Не нашёл «{name}». Список: ' +
+                                            ', '.join(p['n'] for p in st['players']))
+            return
+        if st['stage'] != 'reg':
+            await update.message.reply_text(
+                f'Турнир уже идёт — убрать «{hit["n"]}» из сыгранной сетки нельзя.\n'
+                'Варианты: его несыгранные матчи вносите как 3:0 сопернику, '
+                'или полный перезапуск: /fc reset confirm')
+            return
+        st['players'] = [p for p in st['players'] if p is not hit]; _fc_save(st)
+        await update.message.reply_text(f'🗑 Убрал: {hit["n"]}. Участников: {len(st["players"])}\n' +
+                                        (', '.join(p['n'] for p in st['players']) or '—'))
+        return
+
+    if sub == 'reset':
+        if not is_admin(uid): return
+        if not (len(args) > 1 and args[1].lower() == 'confirm'):
+            await update.message.reply_text(
+                f'⚠️ Полный сброс FC26 (участники: {len(st["players"])}, стадия: {st["stage"]}). '
+                'Подтверди: /fc reset confirm')
+            return
+        _fc_save(fc26.new_state())
+        await update.message.reply_text('✅ FC26 обнулён — регистрация открыта заново (/fcmenu в группу).')
+        return
+
     if sub == 'start':
         if not is_admin(uid): return
         if len(st['players']) < 4:
